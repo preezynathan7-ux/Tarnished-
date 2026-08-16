@@ -1,7 +1,7 @@
 from pybit.unified_trading import HTTP
 import time
 import logging
-import os
+import os 
 print("=== DEBUG ===")
 print("API_KEY:", os.getenv("API_KEY"))
 print("API_SECRET:", os.getenv("API_SECRET")[:5] + "..." if os.getenv("API_SECRET") else "MANQUANTE")
