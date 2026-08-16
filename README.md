@@ -1,0 +1,2 @@
+# Tarnished-
+Bybit trading bot
