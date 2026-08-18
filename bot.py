@@ -17,7 +17,7 @@ LEVERAGE = 10
 TAILLE_POSITION_BSB = 200
 STOP_LOSS = 0.025
 TAKE_PROFIT = 0.06
-SCORE_SEUIL_BASE = 2.0
+SCORE_SEUIL_BASE = 1.5
 INVERSION_FACTOR = 1.5
 VOLATILITY_PERIOD = 20
 
@@ -33,7 +33,19 @@ VOLUME_SPIKE = 1.3
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
+# === PROXY (Singapour) ===
+proxies = {
+    "http": "http://51.15.1.1:3128",   # Remplacer par une IP valide
+    "https": "http://51.15.1.1:3128",
+}
+
+session = HTTP(
+    testnet=False,
+    demo=True,
+    api_key=API_KEY,
+    api_secret=API_SECRET,
+    proxies=proxies,  # ← Proxy pour contourner le blocage USA
+)
 
 # ============================================================
 #  JOURNAL ET LOGS
@@ -119,25 +131,35 @@ def get_market_cap(symbol="BSB"):
         return 0
 
 # ============================================================
-#  POIDS
+#  POIDS (CORRIGÉ)
 # ============================================================
 
 def load_poids():
-    default = {"macd":1.0, "ema":1.0, "rsi":0.5, "stoch":0.5, "bos":0.5, "volume":0.5, "score_seuil":SCORE_SEUIL_BASE, "last_update":datetime.now().isoformat()}
+    default = {
+        "macd": 1.0,
+        "ema": 1.0,
+        "rsi": 0.5,
+        "stoch": 0.5,
+        "bos": 0.5,
+        "volume": 0.5,
+        "score_seuil": SCORE_SEUIL_BASE,
+        "last_update": datetime.now().isoformat()
+    }
     try:
         with open(POIDS_FILE, "r") as f:
             poids = json.load(f)
-            # On ne force pas le seuil, on utilise la valeur du fichier
-# ou la valeur par défaut si elle n'existe pas
-if "score_seuil" not in poids:
-    poids["score_seuil"] = SCORE_SEUIL_BASE
+            if "score_seuil" not in poids:
+                poids["score_seuil"] = SCORE_SEUIL_BASE
             return poids
-    except:
+    except (FileNotFoundError, json.JSONDecodeError):
         return default
 
 def save_poids(poids):
-    with open(POIDS_FILE, "w") as f:
-        json.dump(poids, f, indent=2)
+    try:
+        with open(POIDS_FILE, "w") as f:
+            json.dump(poids, f, indent=2)
+    except:
+        pass
 
 def optimize_poids(btc_trend, fear_greed, market_cap):
     poids = load_poids()
@@ -285,7 +307,7 @@ def close_position(side, qty):
 def bot():
     logging.info("🤖 Bot 'Tarnished V2' démarré (mode démo)")
     logging.info(f"📊 Symbole: {SYMBOLE} | Levier: {LEVERAGE}x | Position: {TAILLE_POSITION_BSB} BSB")
-    logging.info(f"📈 Seuil de score FORCÉ à {SCORE_SEUIL_BASE}")
+    logging.info(f"📈 Seuil de score: {SCORE_SEUIL_BASE}")
 
     poids = load_poids()
     last_optimization = datetime.now()
@@ -414,6 +436,9 @@ def bot():
             if trend_bear and buy_score > 0:
                 buy_score = 0
                 buy_details = []
+
+            # === LOGS DE DEBUG ===
+            logging.info(f"📊 DEBUG - buy_score: {buy_score:.2f} | sell_score: {sell_score:.2f} | seuil: {poids['score_seuil']:.2f} | prix: {price:.4f} | RSI: {rsi:.2f}")
 
             buy_proba = 50.0
             sell_proba = 50.0
