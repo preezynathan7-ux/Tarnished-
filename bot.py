@@ -44,7 +44,7 @@ session = HTTP(
     demo=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
-    proxies=proxies,  # ← Proxy pour contourner le blocage USA
+    proxies=proxies,
 )
 
 # ============================================================
@@ -131,7 +131,7 @@ def get_market_cap(symbol="BSB"):
         return 0
 
 # ============================================================
-#  POIDS (CORRIGÉ)
+#  POIDS
 # ============================================================
 
 def load_poids():
