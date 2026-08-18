@@ -127,7 +127,10 @@ def load_poids():
     try:
         with open(POIDS_FILE, "r") as f:
             poids = json.load(f)
-            poids["score_seuil"] = SCORE_SEUIL_BASE
+            # On ne force pas le seuil, on utilise la valeur du fichier
+# ou la valeur par défaut si elle n'existe pas
+if "score_seuil" not in poids:
+    poids["score_seuil"] = SCORE_SEUIL_BASE
             return poids
     except:
         return default
