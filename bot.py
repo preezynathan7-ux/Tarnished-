@@ -277,7 +277,7 @@ def close_position(side, qty):
     return create_order(opp, qty)
 
 # ============================================================
-#  BOUCLE PRINCIPALE – GAMBIT
+#  BOUCLE PRINCIPALE – GAMBIT (corrigée)
 # ============================================================
 
 def bot():
@@ -492,13 +492,19 @@ def bot():
                     logging.info(f"🔻 SL à {price:.4f} | P&L: {pnl*100:.2f}%")
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "SL", entry_proba_tp)
-                    position, entry_price, entry_score, entry_proba_tp = None, 0, 0.0, 0.0
+                    position = None
+                    entry_price = 0
+                    entry_score = 0.0
+                    entry_proba_tp = 0.0
                     continue
                 elif pnl >= TAKE_PROFIT:
                     logging.info(f"🔺 TP à {price:.4f} | P&L: {pnl*100:.2f}%")
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "TP", entry_proba_tp)
-                    position, entry_price, entry_score, entry_proba_tp = None, 0, 0.0, 0.0
+                    position = None
+                    entry_price = 0
+                    entry_score = 0.0
+                    entry_proba_tp = 0.0
                     continue
 
                 if position == 'buy' and sell_score > entry_score * 1.5:
@@ -506,7 +512,10 @@ def bot():
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
                     if create_order('sell', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score, entry_proba_tp = 'sell', price, sell_score, sell_proba
+                        position = 'sell'
+                        entry_price = price
+                        entry_score = sell_score
+                        entry_proba_tp = sell_proba
                         log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
                     continue
                 elif position == 'sell' and buy_score > entry_score * 1.5:
@@ -514,15 +523,103 @@ def bot():
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
                     if create_order('buy', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score, entry_proba_tp = 'buy', price, buy_score, buy_proba
+                        position = 'buy'
+                        entry_price = price
+                        entry_score = buy_score
+                        entry_proba_tp = buy_proba
                         log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
                     continue
 
             if position is None:
+                            # === PROBABILITÉ TP ===
+            buy_proba = 50.0
+            sell_proba = 50.0
+            sl_price_buy = price * (1 - STOP_LOSS)
+            tp_price_buy = price * (1 + TAKE_PROFIT)
+            sl_price_sell = price * (1 + STOP_LOSS)
+            tp_price_sell = price * (1 - TAKE_PROFIT)
+
+            if buy_score >= SCORE_SEUIL:
+                buy_proba = calculate_tp_probability(ohlcv, price, sl_price_buy, tp_price_buy)
+            if sell_score >= SCORE_SEUIL:
+                sell_proba = calculate_tp_probability(ohlcv, price, sl_price_sell, tp_price_sell)
+
+            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
+
+            if buy_score >= SCORE_SEUIL:
+                logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | probaTP:{buy_proba:.1f}% | indicateurs: {', '.join(buy_details)}")
+            if sell_score >= SCORE_SEUIL:
+                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}")
+
+            # === GESTION POSITION ===
+            if position is not None and entry_price > 0:
+                pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
+                pnl *= LEVERAGE
+
+                if pnl <= -STOP_LOSS:
+                    logging.info(f"🔻 SL à {price:.4f} | P&L: {pnl*100:.2f}%")
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "SL", entry_proba_tp)
+                    position = None
+                    entry_price = 0
+                    entry_score = 0.0
+                    entry_proba_tp = 0.0
+                    continue
+                elif pnl >= TAKE_PROFIT:
+                    logging.info(f"🔺 TP à {price:.4f} | P&L: {pnl*100:.2f}%")
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "TP", entry_proba_tp)
+                    position = None
+                    entry_price = 0
+                    entry_score = 0.0
+                    entry_proba_tp = 0.0
+                    continue
+
+                if position == 'buy' and sell_score > entry_score * 1.5:
+                    logging.info(f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5")
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                    if create_order('sell', TAILLE_POSITION_BSB):
+                        position = 'sell'
+                        entry_price = price
+                        entry_score = sell_score
+                        entry_proba_tp = sell_proba
+                        log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
+                    continue
+                elif position == 'sell' and buy_score > entry_score * 1.5:
+                    logging.info(f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5")
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                    if create_order('buy', TAILLE_POSITION_BSB):
+                        position = 'buy'
+                        entry_price = price
+                        entry_score = buy_score
+                        entry_proba_tp = buy_proba
+                        log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
+                    continue
+
+            # === NOUVELLE ENTRÉE ===
+            if position is None:
                 if buy_score >= SCORE_SEUIL:
                     if create_order('buy', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score, entry_proba_tp = 'buy', price, buy_score, buy_proba
+                        position = 'buy'
+                        entry_price = price
+                        entry_score = buy_score
+                        entry_proba_tp = buy_proba
                         log_trade("OPEN", 'buy', price, buy_score, 0, "NEW", buy_proba)
                 elif sell_score >= SCORE_SEUIL:
                     if create_order('sell', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score, entry_proba_tp = 'sell', price, sell_score, sell
+                        position = 'sell'
+                        entry_price = price
+                        entry_score = sell_score
+                        entry_proba_tp = sell_proba
+                        log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
+
+            time.sleep(30)
+
+        except Exception as e:
+            logging.error(f"❌ Erreur: {e}")
+            time.sleep(60)
+
+if __name__ == "__main__":
+    bot()
