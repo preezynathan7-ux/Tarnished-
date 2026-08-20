@@ -119,7 +119,7 @@ def collect_and_log_market_info(ohlcv):
     atr = get_atr(ohlcv, len(ohlcv)-1, 14)
     vol_ma = get_volume_ma(ohlcv, len(ohlcv)-1, 20)
     current_volume = float(ohlcv[-1][4])
-    vol_spike = current_volume / vol_ma if vol_ma else 1.0
+    vol_spike = current_volume / vol_ma if vol_ma and vol_ma > 0 else 1.0
 
     if ema50 and ema200:
         trend = "HAUSSIÈRE" if ema50 > ema200 else "BAISSIÈRE"
