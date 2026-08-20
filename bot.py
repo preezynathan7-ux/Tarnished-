@@ -14,27 +14,57 @@ LEVERAGE = 10
 TAILLE_POSITION_BSB = 200
 STOP_LOSS = 0.025
 TAKE_PROFIT = 0.06
-SCORE_SEUIL = 1.5
+SCORE_SEUIL = 1.2           # ← 1.2
 
 API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
 API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
 
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+# --- Indicateurs (assouplis) ---
+RSI_OVERSOLD = 40            # ← 40 (au lieu de 30)
+RSI_OVERBOUGHT = 60          # ← 60 (au lieu de 70)
 VOLUME_SPIKE = 1.3
+ATR_THRESHOLD = 0.0008
+
+# --- POIDS DES INDICATEURS ---
+POIDS_MACD = 0.8             # ← réduit à 0.8
+POIDS_EMA = 0.5
+POIDS_RSI = 0.5
+POIDS_STOCHRSI = 0.5
+POIDS_BOS = 0.5
+POIDS_VOLUME = 0.5
+POIDS_PSAR = 0.5
+POIDS_ATR = 0.5
+POIDS_STOCH = 0.5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# === Connexion DIRECTE (sans proxy) ===
-session = HTTP(
-    testnet=False,
-    demo=True,
-    api_key=API_KEY,
-    api_secret=API_SECRET,
-)
+session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
 # ============================================================
-#  INDICATEURS
+#  JOURNAL QUOTIDIEN
+# ============================================================
+
+def print_daily_summary():
+    try:
+        with open("journal_trading.txt", "r") as f:
+            lines = f.readlines()
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_trades = [l for l in lines if today in l and "CLOSE" in l]
+        total = len(today_trades)
+        if total == 0:
+            logging.info(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            return
+        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
+        win_rate = len(winning) / total * 100
+        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
+        logging.info(f"📊 RÉSUMÉ DU {today}")
+        logging.info(f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}")
+        logging.info(f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+    except:
+        pass
+
+# ============================================================
+#  INDICATEURS (inchangés)
 # ============================================================
 
 def get_current_price():
@@ -97,6 +127,44 @@ def get_stoch_rsi(ohlcv, index, period=14):
     stoch = (rsi_values[-1] - mn) / (mx - mn)
     return stoch * 100, stoch * 100
 
+def get_stoch(ohlcv, index, k_period=14, d_period=3):
+    if index < k_period + d_period:
+        return 50, 50
+    closes = [float(c[3]) for c in ohlcv[index-k_period+1:index+1]]
+    lows = [float(c[2]) for c in ohlcv[index-k_period+1:index+1]]
+    highs = [float(c[1]) for c in ohlcv[index-k_period+1:index+1]]
+    lowest = min(lows)
+    highest = max(highs)
+    if highest == lowest:
+        return 50, 50
+    k = 100 * (closes[-1] - lowest) / (highest - lowest)
+    d = k
+    return k, d
+
+def get_psar(ohlcv, index, step=0.02, max_step=0.2):
+    if index < 2:
+        return None
+    high = float(ohlcv[index][1])
+    low = float(ohlcv[index][2])
+    prev_high = float(ohlcv[index-1][1])
+    prev_low = float(ohlcv[index-1][2])
+    if high > prev_high:
+        return prev_low * (1 - step)
+    else:
+        return prev_high * (1 + step)
+
+def get_atr(ohlcv, index, period=14):
+    if index < period:
+        return None
+    true_ranges = []
+    for i in range(index - period + 1, index + 1):
+        high = float(ohlcv[i][1])
+        low = float(ohlcv[i][2])
+        prev_close = float(ohlcv[i-1][3]) if i > 0 else low
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    return sum(true_ranges) / len(true_ranges)
+
 def detect_bos(ohlcv, index):
     if index < 5:
         return False, False
@@ -146,15 +214,16 @@ def close_position(side, qty):
 # ============================================================
 
 def bot():
-    logging.info("🤖 Bot 'Tarnished Light' démarré (mode démo)")
+    logging.info("🤖 Bot 'Tarnished V2' démarré (mode démo)")
     logging.info(f"📊 Symbole: {SYMBOLE} | Levier: {LEVERAGE}x | Position: {TAILLE_POSITION_BSB} BSB")
     logging.info(f"📈 Seuil de score: {SCORE_SEUIL}")
+    logging.info(f"⚖️ Poids MACD: {POIDS_MACD} | RSI seuils: {RSI_OVERSOLD}/{RSI_OVERBOUGHT}")
 
     position = None
     entry_price = 0
     entry_score = 0.0
+    last_daily_log = datetime.now().date()
 
-    # === Reprise des positions existantes ===
     side, qty, avg = get_position()
     if side is not None:
         position = side
@@ -163,6 +232,12 @@ def bot():
 
     while True:
         try:
+            # === Journal quotidien ===
+            today = datetime.now().date()
+            if today != last_daily_log:
+                print_daily_summary()
+                last_daily_log = today
+
             ohlcv = get_ohlcv(100)
             if not ohlcv or len(ohlcv) < 30:
                 time.sleep(30)
@@ -170,7 +245,6 @@ def bot():
 
             price = get_current_price()
 
-            # === Vérifier si une position existe ===
             side, qty, avg = get_position()
             if side is not None:
                 if position is None:
@@ -184,18 +258,23 @@ def bot():
                     entry_price = 0
                     entry_score = 0.0
 
-            # === Indicateurs ===
             i = len(ohlcv) - 1
             rsi = get_rsi(ohlcv, i)
             ema50 = get_ema(ohlcv, i, 50)
             ema200 = get_ema(ohlcv, i, 200)
             macd, signal = get_macd(ohlcv, i)
             stoch_k, stoch_d = get_stoch_rsi(ohlcv, i)
+            stoch_k2, stoch_d2 = get_stoch(ohlcv, i)
+            psar = get_psar(ohlcv, i)
+            atr = get_atr(ohlcv, i)
             vol_ma = get_volume_ma(ohlcv, i, 20)
             bos_h, bos_b = detect_bos(ohlcv, i)
             current_volume = float(ohlcv[i][4])
 
-            # === Tendance ===
+            if atr is not None and atr < ATR_THRESHOLD:
+                time.sleep(30)
+                continue
+
             if ema50 is not None and ema200 is not None:
                 trend_bull = ema50 > ema200
                 trend_bear = ema50 < ema200
@@ -203,64 +282,91 @@ def bot():
                 trend_bull = False
                 trend_bear = False
 
-            # === SCORE SIMPLE ===
+            psar_bull = price > psar if psar is not None else False
+            psar_bear = price < psar if psar is not None else False
+
             buy_score = 0.0
             sell_score = 0.0
             buy_details = []
             sell_details = []
 
-            # 1. MACD (prioritaire)
+            # 1. MACD (poids réduit à 0.8)
             if macd is not None and signal is not None:
                 if macd > signal:
-                    buy_score += 1.0
-                    buy_details.append("MACD")
+                    buy_score += POIDS_MACD
+                    buy_details.append(f"MACD({POIDS_MACD:.1f})")
                 else:
-                    sell_score += 1.0
-                    sell_details.append("MACD")
+                    sell_score += POIDS_MACD
+                    sell_details.append(f"MACD({POIDS_MACD:.1f})")
 
-            # 2. EMA (tendance)
+            # 2. EMA (0.5)
             if ema50 is not None:
                 if price > ema50:
-                    buy_score += 0.5
+                    buy_score += POIDS_EMA
                     buy_details.append("EMA")
                 else:
-                    sell_score += 0.5
+                    sell_score += POIDS_EMA
                     sell_details.append("EMA")
 
-            # 3. RSI (uniquement dans le sens de la tendance)
+            # 3. RSI (assoupli : <40 pour BUY, >60 pour SELL)
             if trend_bull and rsi < RSI_OVERSOLD:
-                buy_score += 0.5
-                buy_details.append("RSI")
+                buy_score += POIDS_RSI
+                buy_details.append(f"RSI({rsi:.1f})")
             elif trend_bear and rsi > RSI_OVERBOUGHT:
-                sell_score += 0.5
-                sell_details.append("RSI")
+                sell_score += POIDS_RSI
+                sell_details.append(f"RSI({rsi:.1f})")
 
-            # 4. StochRSI (uniquement dans le sens de la tendance)
+            # 4. StochRSI (0.5)
             if trend_bull and stoch_k < 20 and stoch_d < 20:
-                buy_score += 0.5
-                buy_details.append("Stoch")
+                buy_score += POIDS_STOCHRSI
+                buy_details.append("StochRSI")
             elif trend_bear and stoch_k > 80 and stoch_d > 80:
-                sell_score += 0.5
-                sell_details.append("Stoch")
+                sell_score += POIDS_STOCHRSI
+                sell_details.append("StochRSI")
 
-            # 5. BOS (uniquement dans le sens de la tendance)
+            # 5. BOS (0.5)
             if trend_bull and bos_h:
-                buy_score += 0.5
+                buy_score += POIDS_BOS
                 buy_details.append("BOS")
             elif trend_bear and bos_b:
-                sell_score += 0.5
+                sell_score += POIDS_BOS
                 sell_details.append("BOS")
 
-            # 6. Volume (confirmation)
+            # 6. Volume (0.5)
             if vol_ma is not None and current_volume > vol_ma * VOLUME_SPIKE:
                 if buy_score > 0:
-                    buy_score += 0.5
+                    buy_score += POIDS_VOLUME
                     buy_details.append("Vol")
                 elif sell_score > 0:
-                    sell_score += 0.5
+                    sell_score += POIDS_VOLUME
                     sell_details.append("Vol")
 
-            # === RÈGLE DE PRIORITÉ MACD ===
+            # 7. PSAR (0.5)
+            if trend_bull and psar_bull:
+                buy_score += POIDS_PSAR
+                buy_details.append("PSAR")
+            elif trend_bear and psar_bear:
+                sell_score += POIDS_PSAR
+                sell_details.append("PSAR")
+
+            # 8. ATR (0.5)
+            if atr is not None and atr > ATR_THRESHOLD * 2:
+                if buy_score > 0:
+                    buy_score += POIDS_ATR
+                    buy_details.append("ATR")
+                elif sell_score > 0:
+                    sell_score += POIDS_ATR
+                    sell_details.append("ATR")
+
+            # 9. Stoch (0.5)
+            if trend_bull and stoch_k2 < 20 and stoch_d2 < 20:
+                buy_score += POIDS_STOCH
+                buy_details.append("Stoch")
+            elif trend_bear and stoch_k2 > 80 and stoch_d2 > 80:
+                sell_score += POIDS_STOCH
+                sell_details.append("Stoch")
+
+            # === PRIORITÉ MACD (toujours active mais avec moins de poids) ===
             if macd is not None and signal is not None:
                 if macd > signal and sell_score > 0:
                     sell_score = 0
@@ -269,7 +375,7 @@ def bot():
                     buy_score = 0
                     buy_details = []
 
-            # === FILTRE DE TENDANCE (ne trade pas à contre-tendance) ===
+            # === FILTRE DE TENDANCE ===
             if trend_bull and sell_score > 0:
                 sell_score = 0
                 sell_details = []
@@ -278,7 +384,7 @@ def bot():
                 buy_details = []
 
             # === LOGS ===
-            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | prix: {price:.4f} | RSI: {rsi:.2f}")
+            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | prix: {price:.4f} | RSI: {rsi:.1f}")
 
             if buy_score >= SCORE_SEUIL:
                 logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | indicateurs: {', '.join(buy_details)}")
@@ -301,7 +407,6 @@ def bot():
                     position, entry_price, entry_score = None, 0, 0.0
                     continue
 
-                # === INVERSION (si score opposé > score d'entrée * 1.5) ===
                 if position == 'buy' and sell_score > entry_score * 1.5:
                     logging.info(f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5")
                     close_position(position, qty)
