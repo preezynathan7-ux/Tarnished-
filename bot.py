@@ -14,19 +14,20 @@ LEVERAGE = 10
 TAILLE_POSITION_BSB = 200
 STOP_LOSS = 0.025
 TAKE_PROFIT = 0.06
-SCORE_SEUIL = 1.2           # ← 1.2
+SCORE_SEUIL = 1.2
 
 API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
 API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
 
-# --- Indicateurs (assouplis) ---
-RSI_OVERSOLD = 40            # ← 40 (au lieu de 30)
-RSI_OVERBOUGHT = 60          # ← 60 (au lieu de 70)
+# --- RSI différencié ---
+RSI6_OVERSOLD = 40            # pour les BUY (retournements haussiers)
+RSI24_OVERBOUGHT = 45         # pour les SELL (retournements baissiers)
+
 VOLUME_SPIKE = 1.3
 ATR_THRESHOLD = 0.0008
 
 # --- POIDS DES INDICATEURS ---
-POIDS_MACD = 0.8             # ← réduit à 0.8
+POIDS_MACD = 0.8
 POIDS_EMA = 0.5
 POIDS_RSI = 0.5
 POIDS_STOCHRSI = 0.5
@@ -41,39 +42,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
 # ============================================================
-#  JOURNAL QUOTIDIEN
+#  INDICATEURS
 # ============================================================
-
-def print_daily_summary():
-    try:
-        with open("journal_trading.txt", "r") as f:
-            lines = f.readlines()
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_trades = [l for l in lines if today in l and "CLOSE" in l]
-        total = len(today_trades)
-        if total == 0:
-            logging.info(f"📊 Aucun trade clôturé aujourd'hui ({today})")
-            return
-        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
-        win_rate = len(winning) / total * 100
-        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        logging.info(f"📊 RÉSUMÉ DU {today}")
-        logging.info(f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}")
-        logging.info(f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
-    except:
-        pass
-
-# ============================================================
-#  INDICATEURS (inchangés)
-# ============================================================
-
-def get_current_price():
-    tickers = session.get_tickers(category="linear", symbol=SYMBOLE)
-    return float(tickers["result"]["list"][0]["lastPrice"])
-
-def get_ohlcv(limit=100):
-    data = session.get_kline(category="linear", symbol=SYMBOLE, interval=15, limit=limit)
-    return data["result"]["list"]
 
 def get_rsi(ohlcv, index, period=14):
     if index < period + 1:
@@ -178,10 +148,6 @@ def get_volume_ma(ohlcv, index, period=20):
     volumes = [float(c[4]) for c in ohlcv[index-period:index]]
     return sum(volumes) / len(volumes)
 
-# ============================================================
-#  ORDRES
-# ============================================================
-
 def get_position():
     pos = session.get_positions(category="linear", symbol=SYMBOLE)
     if pos["result"]["list"]:
@@ -214,15 +180,13 @@ def close_position(side, qty):
 # ============================================================
 
 def bot():
-    logging.info("🤖 Bot 'Tarnished V2' démarré (mode démo)")
+    logging.info("🤖 Bot 'Tarnished RSI Diff' démarré (mode démo)")
     logging.info(f"📊 Symbole: {SYMBOLE} | Levier: {LEVERAGE}x | Position: {TAILLE_POSITION_BSB} BSB")
-    logging.info(f"📈 Seuil de score: {SCORE_SEUIL}")
-    logging.info(f"⚖️ Poids MACD: {POIDS_MACD} | RSI seuils: {RSI_OVERSOLD}/{RSI_OVERBOUGHT}")
+    logging.info(f"📈 Seuil: {SCORE_SEUIL} | RSI6 BUY: < {RSI6_OVERSOLD} | RSI24 SELL: < {RSI24_OVERBOUGHT}")
 
     position = None
     entry_price = 0
     entry_score = 0.0
-    last_daily_log = datetime.now().date()
 
     side, qty, avg = get_position()
     if side is not None:
@@ -232,12 +196,6 @@ def bot():
 
     while True:
         try:
-            # === Journal quotidien ===
-            today = datetime.now().date()
-            if today != last_daily_log:
-                print_daily_summary()
-                last_daily_log = today
-
             ohlcv = get_ohlcv(100)
             if not ohlcv or len(ohlcv) < 30:
                 time.sleep(30)
@@ -259,7 +217,11 @@ def bot():
                     entry_score = 0.0
 
             i = len(ohlcv) - 1
-            rsi = get_rsi(ohlcv, i)
+
+            # === RSI différenciés ===
+            rsi6 = get_rsi(ohlcv, i, 6)
+            rsi24 = get_rsi(ohlcv, i, 24)
+
             ema50 = get_ema(ohlcv, i, 50)
             ema200 = get_ema(ohlcv, i, 200)
             macd, signal = get_macd(ohlcv, i)
@@ -290,14 +252,14 @@ def bot():
             buy_details = []
             sell_details = []
 
-            # 1. MACD (poids réduit à 0.8)
+            # 1. MACD (0.8)
             if macd is not None and signal is not None:
                 if macd > signal:
                     buy_score += POIDS_MACD
-                    buy_details.append(f"MACD({POIDS_MACD:.1f})")
+                    buy_details.append("MACD")
                 else:
                     sell_score += POIDS_MACD
-                    sell_details.append(f"MACD({POIDS_MACD:.1f})")
+                    sell_details.append("MACD")
 
             # 2. EMA (0.5)
             if ema50 is not None:
@@ -308,13 +270,15 @@ def bot():
                     sell_score += POIDS_EMA
                     sell_details.append("EMA")
 
-            # 3. RSI (assoupli : <40 pour BUY, >60 pour SELL)
-            if trend_bull and rsi < RSI_OVERSOLD:
+            # 3. RSI DIFFÉRENCIÉ
+            # BUY : RSI6 < 40
+            if trend_bull and rsi6 < RSI6_OVERSOLD:
                 buy_score += POIDS_RSI
-                buy_details.append(f"RSI({rsi:.1f})")
-            elif trend_bear and rsi > RSI_OVERBOUGHT:
+                buy_details.append(f"RSI6({rsi6:.1f})")
+            # SELL : RSI24 < 45 (retournement baissier)
+            elif trend_bear and rsi24 < RSI24_OVERBOUGHT:
                 sell_score += POIDS_RSI
-                sell_details.append(f"RSI({rsi:.1f})")
+                sell_details.append(f"RSI24({rsi24:.1f})")
 
             # 4. StochRSI (0.5)
             if trend_bull and stoch_k < 20 and stoch_d < 20:
@@ -366,7 +330,7 @@ def bot():
                 sell_score += POIDS_STOCH
                 sell_details.append("Stoch")
 
-            # === PRIORITÉ MACD (toujours active mais avec moins de poids) ===
+            # === PRIORITÉ MACD ===
             if macd is not None and signal is not None:
                 if macd > signal and sell_score > 0:
                     sell_score = 0
@@ -384,7 +348,7 @@ def bot():
                 buy_details = []
 
             # === LOGS ===
-            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | prix: {price:.4f} | RSI: {rsi:.1f}")
+            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
 
             if buy_score >= SCORE_SEUIL:
                 logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | indicateurs: {', '.join(buy_details)}")
