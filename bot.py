@@ -2,6 +2,7 @@ from pybit.unified_trading import HTTP
 import time
 import logging
 import os
+import math
 from datetime import datetime
 
 # ============================================================
@@ -12,13 +13,25 @@ SYMBOLE = "BSBUSDT"
 TIMEFRAME = "15"
 LEVERAGE = 10
 TAILLE_POSITION_BSB = 200
-
-# --- SL/TP fixes ---
 STOP_LOSS = 0.025
 TAKE_PROFIT = 0.06
-
-# --- Seuil ---
 SCORE_SEUIL = 1.2
+
+API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
+API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
+
+# --- RSI différencié ---
+RSI6_OVERSOLD = 40
+RSI24_OVERBOUGHT = 45
+
+# --- Règle de retournement fort ---
+RETOURNEMENT_RSI6 = 30
+RETOURNEMENT_STOCH = 20
+RETOURNEMENT_VOLUME_MA = 10
+
+# --- Filtre ATR ---
+ATR_THRESHOLD = 0.0008
+VOLATILITY_PERIOD = 20
 
 # --- Poids égaux ---
 POIDS_MACD = 0.6
@@ -31,27 +44,107 @@ POIDS_PSAR = 0.6
 POIDS_ATR = 0.6
 POIDS_STOCH = 0.6
 
-# --- RSI différencié ---
-RSI6_OVERSOLD = 40
-RSI24_OVERBOUGHT = 45
-
-# --- Règle de retournement fort ---
-RETOURNEMENT_RSI6 = 30
-RETOURNEMENT_STOCH = 20
-RETOURNEMENT_VOLUME_MA = 10
-
 VOLUME_SPIKE = 1.3
-ATR_THRESHOLD = 0.0008
 
-API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
-API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
+JOURNAL_FILE = "journal_trading.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
 # ============================================================
-#  INDICATEURS (inchangés)
+#  JOURNAL ET PROBABILITÉ TP
+# ============================================================
+
+def log_trade(action, side, price, score, pnl=0, reason="", proba_tp=0):
+    try:
+        with open(JOURNAL_FILE, "a") as f:
+            f.write(f"{datetime.now().isoformat()} | {action} | {side} | {price:.6f} | score:{score:.2f} | P&L:{pnl:.2f} | probaTP:{proba_tp:.1f}% | {reason}\n")
+    except:
+        pass
+
+def calculate_tp_probability(ohlcv, entry_price, sl_price, tp_price):
+    if len(ohlcv) < VOLATILITY_PERIOD:
+        return 50.0
+    closes = [float(c[3]) for c in ohlcv[-VOLATILITY_PERIOD:]]
+    if len(closes) < 2:
+        return 50.0
+    returns = []
+    for i in range(1, len(closes)):
+        returns.append((closes[i] - closes[i-1]) / closes[i-1])
+    if not returns:
+        return 50.0
+    std_dev = math.sqrt(sum([r**2 for r in returns]) / len(returns))
+    daily_volatility = std_dev * 100
+    tp_distance = abs(tp_price - entry_price) / entry_price * 100
+    sl_distance = abs(sl_price - entry_price) / entry_price * 100
+    if sl_distance == 0:
+        return 50.0
+    ratio = tp_distance / sl_distance
+    if daily_volatility > tp_distance * 0.8:
+        prob = 70.0
+    elif daily_volatility > tp_distance * 0.5:
+        prob = 55.0
+    else:
+        prob = 40.0
+    if ratio > 2.5:
+        prob = min(prob * 0.8, 60)
+    elif ratio < 1.5:
+        prob = min(prob * 1.2, 85)
+    return max(5.0, min(95.0, prob))
+
+def print_daily_summary():
+    try:
+        with open(JOURNAL_FILE, "r") as f:
+            lines = f.readlines()
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_trades = [l for l in lines if today in l and "CLOSE" in l]
+        total = len(today_trades)
+        if total == 0:
+            logging.info(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            return
+        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
+        win_rate = len(winning) / total * 100 if total > 0 else 0
+        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
+        logging.info(f"📊 RÉSUMÉ DU {today}")
+        logging.info(f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}")
+        logging.info(f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+    except:
+        pass
+
+# ============================================================
+#  COLLECTE D'INFOS (horaire)
+# ============================================================
+
+def collect_and_log_market_info(ohlcv):
+    """Analyse le marché et log les infos clés (tendance, RSI, volume)"""
+    if not ohlcv or len(ohlcv) < 50:
+        return
+    last = float(ohlcv[-1][3])
+    ema50 = get_ema(ohlcv, len(ohlcv)-1, 50)
+    ema200 = get_ema(ohlcv, len(ohlcv)-1, 200)
+    rsi6 = get_rsi(ohlcv, len(ohlcv)-1, 6)
+    rsi24 = get_rsi(ohlcv, len(ohlcv)-1, 24)
+    atr = get_atr(ohlcv, len(ohlcv)-1, 14)
+    vol_ma = get_volume_ma(ohlcv, len(ohlcv)-1, 20)
+    current_volume = float(ohlcv[-1][4])
+    vol_spike = current_volume / vol_ma if vol_ma else 1.0
+
+    if ema50 and ema200:
+        trend = "HAUSSIÈRE" if ema50 > ema200 else "BAISSIÈRE"
+    else:
+        trend = "INCONNUE"
+
+    logging.info("="*50)
+    logging.info("📊 ANALYSE MARCHÉ (collecte horaire)")
+    logging.info(f"💰 Prix: {last:.6f}")
+    logging.info(f"📈 Tendance: {trend} | EMA50: {ema50:.6f} | EMA200: {ema200:.6f}")
+    logging.info(f"📉 RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
+    logging.info(f"📊 ATR: {atr:.6f} | Volume spike: {vol_spike:.2f}x")
+    logging.info("="*50)
+
+# ============================================================
+#  INDICATEURS
 # ============================================================
 
 def get_current_price():
@@ -193,42 +286,22 @@ def close_position(side, qty):
     return create_order(opp, qty)
 
 # ============================================================
-#  JOURNAL QUOTIDIEN
-# ============================================================
-
-def print_daily_summary():
-    try:
-        with open("journal_trading.txt", "r") as f:
-            lines = f.readlines()
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_trades = [l for l in lines if today in l and "CLOSE" in l]
-        total = len(today_trades)
-        if total == 0:
-            logging.info(f"📊 Aucun trade clôturé aujourd'hui ({today})")
-            return
-        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
-        win_rate = len(winning) / total * 100 if total > 0 else 0
-        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        logging.info(f"📊 RÉSUMÉ DU {today}")
-        logging.info(f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}")
-        logging.info(f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
-    except:
-        pass
-
-# ============================================================
 #  BOUCLE PRINCIPALE
 # ============================================================
 
 def bot():
-    logging.info("🤖 Bot 'Tarnished Equal' démarré (mode démo)")
+    logging.info("🤖 Bot 'Tarnished Pro' démarré (mode démo)")
     logging.info(f"📊 Symbole: {SYMBOLE} | Levier: {LEVERAGE}x | Position: {TAILLE_POSITION_BSB} BSB")
     logging.info(f"📈 Seuil: {SCORE_SEUIL} | Poids MACD: {POIDS_MACD} (égal aux autres)")
     logging.info(f"🔄 Règle de retournement fort: RSI6 < {RETOURNEMENT_RSI6} + StochRSI < {RETOURNEMENT_STOCH} + Volume > MA{RETOURNEMENT_VOLUME_MA}")
+    logging.info(f"⏳ Filtre ATR: seuil = {ATR_THRESHOLD} (bloque les marchés calmes)")
 
     position = None
     entry_price = 0
     entry_score = 0.0
+    entry_proba_tp = 0.0
     last_daily_log = datetime.now().date()
+    last_hourly_collect = datetime.now().hour
 
     side, qty, avg = get_position()
     if side is not None:
@@ -238,10 +311,19 @@ def bot():
 
     while True:
         try:
+            # === Journal quotidien ===
             today = datetime.now().date()
             if today != last_daily_log:
                 print_daily_summary()
                 last_daily_log = today
+
+            # === Collecte horaire ===
+            current_hour = datetime.now().hour
+            if current_hour != last_hourly_collect:
+                ohlcv_temp = get_ohlcv(100)
+                if ohlcv_temp and len(ohlcv_temp) >= 30:
+                    collect_and_log_market_info(ohlcv_temp)
+                last_hourly_collect = current_hour
 
             ohlcv = get_ohlcv(100)
             if not ohlcv or len(ohlcv) < 30:
@@ -262,9 +344,11 @@ def bot():
                     position = None
                     entry_price = 0
                     entry_score = 0.0
+                    entry_proba_tp = 0.0
 
             i = len(ohlcv) - 1
 
+            # === Indicateurs ===
             rsi6 = get_rsi(ohlcv, i, 6)
             rsi24 = get_rsi(ohlcv, i, 24)
 
@@ -279,10 +363,13 @@ def bot():
             bos_h, bos_b = detect_bos(ohlcv, i)
             current_volume = float(ohlcv[i][4])
 
+            # === FILTRE ATR (avec log) ===
             if atr is not None and atr < ATR_THRESHOLD:
+                logging.info(f"⏳ Marché en range (ATR={atr:.6f} < {ATR_THRESHOLD}) → pas de trade")
                 time.sleep(30)
                 continue
 
+            # === Tendance ===
             if ema50 is not None and ema200 is not None:
                 trend_bull = ema50 > ema200
                 trend_bear = ema50 < ema200
@@ -293,12 +380,13 @@ def bot():
             psar_bull = price > psar if psar is not None else False
             psar_bear = price < psar if psar is not None else False
 
+            # === SCORE ===
             buy_score = 0.0
             sell_score = 0.0
             buy_details = []
             sell_details = []
 
-            # === RÈGLE DE RETOURNEMENT FORT ===
+            # Règle de retournement fort
             retournement_bull = (
                 rsi6 < RETOURNEMENT_RSI6 and
                 stoch_k < RETOURNEMENT_STOCH and
@@ -319,7 +407,7 @@ def bot():
                 sell_score += 1.0
                 sell_details.append("RETOURNEMENT")
 
-            # 1. MACD (poids égal)
+            # 1. MACD
             if macd is not None and signal is not None:
                 if macd > signal:
                     buy_score += POIDS_MACD
@@ -395,10 +483,10 @@ def bot():
                 sell_score += POIDS_STOCH
                 sell_details.append("Stoch")
 
-            # === PAS DE PRIORITÉ MACD (plus de blocage) ===
-            # MACD a le même poids que les autres, il ne bloque plus
+            # === PLUS DE PRIORITÉ MACD ===
+            # MACD a le même poids que les autres
 
-            # === FILTRE DE TENDANCE (toujours actif) ===
+            # === FILTRE DE TENDANCE ===
             if trend_bull and sell_score > 0:
                 sell_score = 0
                 sell_details = []
@@ -406,13 +494,26 @@ def bot():
                 buy_score = 0
                 buy_details = []
 
+            # === PROBABILITÉ TP ===
+            buy_proba = 50.0
+            sell_proba = 50.0
+            sl_price_buy = price * (1 - STOP_LOSS)
+            tp_price_buy = price * (1 + TAKE_PROFIT)
+            sl_price_sell = price * (1 + STOP_LOSS)
+            tp_price_sell = price * (1 - TAKE_PROFIT)
+
+            if buy_score >= SCORE_SEUIL:
+                buy_proba = calculate_tp_probability(ohlcv, price, sl_price_buy, tp_price_buy)
+            if sell_score >= SCORE_SEUIL:
+                sell_proba = calculate_tp_probability(ohlcv, price, sl_price_sell, tp_price_sell)
+
             # === LOGS ===
             logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
 
             if buy_score >= SCORE_SEUIL:
-                logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | indicateurs: {', '.join(buy_details)}")
+                logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | probaTP:{buy_proba:.1f}% | indicateurs: {', '.join(buy_details)}")
             if sell_score >= SCORE_SEUIL:
-                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | indicateurs: {', '.join(sell_details)}")
+                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}")
 
             # === GESTION POSITION ===
             if position is not None and entry_price > 0:
@@ -422,41 +523,23 @@ def bot():
                 if pnl <= -STOP_LOSS:
                     logging.info(f"🔻 SL à {price:.4f} | P&L: {pnl*100:.2f}%")
                     close_position(position, qty)
-                    position, entry_price, entry_score = None, 0, 0.0
+                    log_trade("CLOSE", position, price, entry_score, pnl, "SL", entry_proba_tp)
+                    position, entry_price, entry_score, entry_proba_tp = None, 0, 0.0, 0.0
                     continue
                 elif pnl >= TAKE_PROFIT:
                     logging.info(f"🔺 TP à {price:.4f} | P&L: {pnl*100:.2f}%")
                     close_position(position, qty)
-                    position, entry_price, entry_score = None, 0, 0.0
+                    log_trade("CLOSE", position, price, entry_score, pnl, "TP", entry_proba_tp)
+                    position, entry_price, entry_score, entry_proba_tp = None, 0, 0.0, 0.0
                     continue
 
                 if position == 'buy' and sell_score > entry_score * 1.5:
                     logging.info(f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5")
                     close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
                     if create_order('sell', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score = 'sell', price, sell_score
+                        position, entry_price, entry_score, entry_proba_tp = 'sell', price, sell_score, sell_proba
+                        log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
                     continue
                 elif position == 'sell' and buy_score > entry_score * 1.5:
-                    logging.info(f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5")
-                    close_position(position, qty)
-                    if create_order('buy', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score = 'buy', price, buy_score
-                    continue
-
-            # === NOUVELLE ENTRÉE ===
-            if position is None:
-                if buy_score >= SCORE_SEUIL:
-                    if create_order('buy', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score = 'buy', price, buy_score
-                elif sell_score >= SCORE_SEUIL:
-                    if create_order('sell', TAILLE_POSITION_BSB):
-                        position, entry_price, entry_score = 'sell', price, sell_score
-
-            time.sleep(30)
-
-        except Exception as e:
-            logging.error(f"❌ Erreur: {e}")
-            time.sleep(60)
-
-if __name__ == "__main__":
-    bot()
+                    logging.info(f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score
