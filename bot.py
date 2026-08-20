@@ -531,28 +531,29 @@ def bot():
                         log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
                     continue
 
-            # === NOUVELLE ENTRÉE ===
+                        # === NOUVELLE ENTRÉE ===
             if position is None:
                 if buy_score >= SCORE_SEUIL:
                     if create_order('buy', TAILLE_POSITION_BSB):
                         position = 'buy'
                         entry_price = price
-‎                        entry_score = buy_score
-‎                        entry_proba_tp = buy_proba
-‎                        log_trade("OPEN", 'buy', price, buy_score, 0, "NEW", buy_proba)
-‎                elif sell_score >= SCORE_SEUIL:
-‎                    if create_order('sell', TAILLE_POSITION_BSB):
-‎                        position = 'sell'
-‎                        entry_price = price
-‎                        entry_score = sell_score
-‎                        entry_proba_tp = sell_proba
-‎                        log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
-‎
-‎            time.sleep(30)
-‎
-‎        except Exception as e:
-‎            logging.error(f"❌ Erreur: {e}")
-‎            time.sleep(60)
-‎
-‎if __name__ == "__main__":
-‎    bot()
+                        entry_score = buy_score
+                        entry_proba_tp = buy_proba
+                        log_trade("OPEN", 'buy', price, buy_score, 0, "NEW", buy_proba)
+                elif sell_score >= SCORE_SEUIL:
+                    if create_order('sell', TAILLE_POSITION_BSB):
+                        position = 'sell'
+                        entry_price = price
+                        entry_score = sell_score
+                        entry_proba_tp = sell_proba
+                        log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
+
+            time.sleep(30)
+
+        except Exception as e:
+            logging.error(f"❌ Erreur: {e}")
+            time.sleep(60)
+
+if __name__ == "__main__":
+    bot()
+            
