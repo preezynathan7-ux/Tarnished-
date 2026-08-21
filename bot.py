@@ -121,7 +121,7 @@ def collect_and_log_market_info(ohlcv):
     current_volume = float(ohlcv[-1][4])
     vol_spike = current_volume / vol_ma if vol_ma and vol_ma > 0 else 1.0
 
-    if ema50 and ema200:
+    if ema50 is not None and ema200 is not None:
         trend = "HAUSSIÈRE" if ema50 > ema200 else "BAISSIÈRE"
     else:
         trend = "INCONNUE"
@@ -129,9 +129,18 @@ def collect_and_log_market_info(ohlcv):
     logging.info("="*50)
     logging.info("📊 ANALYSE MARCHÉ (collecte horaire)")
     logging.info(f"💰 Prix: {last:.6f}")
-    logging.info(f"📈 Tendance: {trend} | EMA50: {ema50:.6f} | EMA200: {ema200:.6f}")
+    logging.info(f"📈 Tendance: {trend}")
+    if ema50 is not None:
+        logging.info(f"   EMA50: {ema50:.6f}")
+    else:
+        logging.info("   EMA50: indisponible")
+    if ema200 is not None:
+        logging.info(f"   EMA200: {ema200:.6f}")
+    else:
+        logging.info("   EMA200: indisponible")
     logging.info(f"📉 RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
-    logging.info(f"📊 ATR: {atr:.6f} | Volume spike: {vol_spike:.2f}x")
+    logging.info(f"📊 ATR: {atr:.6f}" if atr is not None else "📊 ATR: indisponible")
+    logging.info(f"📊 Volume spike: {vol_spike:.2f}x")
     logging.info("="*50)
 
 # ============================================================
