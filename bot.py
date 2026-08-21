@@ -518,7 +518,7 @@ def bot():
             if sell_score >= SCORE_SEUIL:
                 logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}")
 
-            # === GESTION POSITION ===
+                        # === GESTION POSITION ===
             if position is not None and entry_price > 0:
                 pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
                 pnl *= LEVERAGE
@@ -546,35 +546,34 @@ def bot():
                     entry_proba_tp = 0.0
                     continue
 
-                            if position == 'buy' and sell_score > entry_score * 1.5:
-                msg = f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5"
-                logging.info(msg)
-                send_telegram(msg)
-                close_position(position, qty)
-                log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                if create_order('sell', TAILLE_POSITION_BSB):
-                    position = 'sell'
-                    entry_price = price
-                    entry_score = sell_score
-                    entry_proba_tp = sell_proba
-                    log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
-                    send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
-                continue
-
-            elif position == 'sell' and buy_score > entry_score * 1.5:
-                msg = f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5"
-                logging.info(msg)
-                send_telegram(msg)
-                close_position(position, qty)
-                log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                if create_order('buy', TAILLE_POSITION_BSB):
-                    position = 'buy'
-                    entry_price = price
-                    entry_score = buy_score
-                    entry_proba_tp = buy_proba
-                    log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
-                    send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
-                continue
+                if position == 'buy' and sell_score > entry_score * 1.5:
+                    msg = f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5"
+                    logging.info(msg)
+                    send_telegram(msg)
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                    if create_order('sell', TAILLE_POSITION_BSB):
+                        position = 'sell'
+                        entry_price = price
+                        entry_score = sell_score
+                        entry_proba_tp = sell_proba
+                        log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
+                        send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
+                    continue
+                elif position == 'sell' and buy_score > entry_score * 1.5:
+                    msg = f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5"
+                    logging.info(msg)
+                    send_telegram(msg)
+                    close_position(position, qty)
+                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                    if create_order('buy', TAILLE_POSITION_BSB):
+                        position = 'buy'
+                        entry_price = price
+                        entry_score = buy_score
+                        entry_proba_tp = buy_proba
+                        log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
+                        send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
+                    continue
 
             # === NOUVELLE ENTRÉE ===
             if position is None:
@@ -605,4 +604,3 @@ def bot():
 
 if __name__ == "__main__":
     bot()
-               
