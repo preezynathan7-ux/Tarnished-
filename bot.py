@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import math
+import requests
 from datetime import datetime
 
 # ============================================================
@@ -19,6 +20,10 @@ SCORE_SEUIL = 1.2
 
 API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
 API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
+
+# --- Telegram ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "7645348359"
 
 RSI6_OVERSOLD = 40
 RSI24_OVERBOUGHT = 45
@@ -47,6 +52,18 @@ JOURNAL_FILE = "journal_trading.txt"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
+
+# ============================================================
+#  TELEGRAM
+# ============================================================
+
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logging.error(f"❌ Erreur envoi Telegram: {e}")
 
 # ============================================================
 #  JOURNAL ET PROBABILITÉ TP
@@ -97,14 +114,18 @@ def print_daily_summary():
         today_trades = [l for l in lines if today in l and "CLOSE" in l]
         total = len(today_trades)
         if total == 0:
-            logging.info(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            msg = f"📊 Aucun trade clôturé aujourd'hui ({today})"
+            logging.info(msg)
+            send_telegram(msg)
             return
         winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
         win_rate = len(winning) / total * 100 if total > 0 else 0
         total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        logging.info(f"📊 RÉSUMÉ DU {today}")
-        logging.info(f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}")
-        logging.info(f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+        msg = (f"📊 RÉSUMÉ DU {today}\n"
+               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
+               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+        logging.info(msg)
+        send_telegram(msg)
     except:
         pass
 
@@ -303,11 +324,13 @@ def bot():
     last_daily_log = datetime.now().date()
     last_hourly_collect = datetime.now().hour
 
+    # --- REPRISE DES POSITIONS AU DÉMARRAGE ---
     side, qty, avg = get_position()
     if side is not None:
         position = side
         entry_price = avg
         logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
+        send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
 
     while True:
         try:
@@ -330,12 +353,14 @@ def bot():
 
             price = get_current_price()
 
+            # Vérifier la position en temps réel
             side, qty, avg = get_position()
             if side is not None:
                 if position is None:
                     position = side
                     entry_price = avg
                     logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
+                    send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
             else:
                 if position is not None:
                     logging.info("🔒 Position fermée")
@@ -499,7 +524,9 @@ def bot():
                 pnl *= LEVERAGE
 
                 if pnl <= -STOP_LOSS:
-                    logging.info(f"🔻 SL à {price:.4f} | P&L: {pnl*100:.2f}%")
+                    msg = f"🔻 SL à {price:.6f} | P&L: {pnl*100:.2f}%"
+                    logging.info(msg)
+                    send_telegram(msg)
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "SL", entry_proba_tp)
                     position = None
@@ -508,7 +535,9 @@ def bot():
                     entry_proba_tp = 0.0
                     continue
                 elif pnl >= TAKE_PROFIT:
-                    logging.info(f"🔺 TP à {price:.4f} | P&L: {pnl*100:.2f}%")
+                    msg = f"🔺 TP à {price:.6f} | P&L: {pnl*100:.2f}%"
+                    logging.info(msg)
+                    send_telegram(msg)
                     close_position(position, qty)
                     log_trade("CLOSE", position, price, entry_score, pnl, "TP", entry_proba_tp)
                     position = None
@@ -517,30 +546,37 @@ def bot():
                     entry_proba_tp = 0.0
                     continue
 
-                if position == 'buy' and sell_score > entry_score * 1.5:
-                    logging.info(f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5")
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                    if create_order('sell', TAILLE_POSITION_BSB):
-                        position = 'sell'
-                        entry_price = price
-                        entry_score = sell_score
-                        entry_proba_tp = sell_proba
-                        log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
-                    continue
-                elif position == 'sell' and buy_score > entry_score * 1.5:
-                    logging.info(f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5")
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                    if create_order('buy', TAILLE_POSITION_BSB):
-                        position = 'buy'
-                        entry_price = price
-                        entry_score = buy_score
-                        entry_proba_tp = buy_proba
-                        log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
-                    continue
+                            if position == 'buy' and sell_score > entry_score * 1.5:
+                msg = f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5"
+                logging.info(msg)
+                send_telegram(msg)
+                close_position(position, qty)
+                log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                if create_order('sell', TAILLE_POSITION_BSB):
+                    position = 'sell'
+                    entry_price = price
+                    entry_score = sell_score
+                    entry_proba_tp = sell_proba
+                    log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
+                    send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
+                continue
 
-                        # === NOUVELLE ENTRÉE ===
+            elif position == 'sell' and buy_score > entry_score * 1.5:
+                msg = f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5"
+                logging.info(msg)
+                send_telegram(msg)
+                close_position(position, qty)
+                log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
+                if create_order('buy', TAILLE_POSITION_BSB):
+                    position = 'buy'
+                    entry_price = price
+                    entry_score = buy_score
+                    entry_proba_tp = buy_proba
+                    log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
+                    send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
+                continue
+
+            # === NOUVELLE ENTRÉE ===
             if position is None:
                 if buy_score >= SCORE_SEUIL:
                     if create_order('buy', TAILLE_POSITION_BSB):
@@ -549,6 +585,7 @@ def bot():
                         entry_score = buy_score
                         entry_proba_tp = buy_proba
                         log_trade("OPEN", 'buy', price, buy_score, 0, "NEW", buy_proba)
+                        send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
                 elif sell_score >= SCORE_SEUIL:
                     if create_order('sell', TAILLE_POSITION_BSB):
                         position = 'sell'
@@ -556,13 +593,16 @@ def bot():
                         entry_score = sell_score
                         entry_proba_tp = sell_proba
                         log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
+                        send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
 
             time.sleep(30)
 
         except Exception as e:
-            logging.error(f"❌ Erreur: {e}")
+            error_msg = f"❌ Erreur critique: {e}"
+            logging.error(error_msg)
+            send_telegram(error_msg)
             time.sleep(60)
 
 if __name__ == "__main__":
     bot()
-            
+               
