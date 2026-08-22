@@ -58,6 +58,25 @@ session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 # ============================================================
 
 def send_telegram(message):
+    def send_stats():
+    try:
+        with open(JOURNAL_FILE, "r") as f:
+            lines = f.readlines()
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_trades = [l for l in lines if today in l and "CLOSE" in l]
+        total = len(today_trades)
+        if total == 0:
+            send_telegram(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            return
+        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
+        win_rate = len(winning) / total * 100 if total > 0 else 0
+        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
+        msg = (f"📊 RÉSUMÉ DU {today}\n"
+               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
+               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+        send_telegram(msg)
+    except:
+        send_telegram("❌ Erreur lors de la lecture du journal.")
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -361,6 +380,21 @@ def bot():
                     entry_price = avg
                     logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
                     send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
+                    # === VÉRIFICATION DES COMMANDES TELEGRAM ===
+try:
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    resp = requests.get(url, timeout=5).json()
+    if resp.get("ok") and resp.get("result"):
+        for update in resp["result"]:
+            if "message" in update and "text" in update["message"]:
+                text = update["message"]["text"]
+                chat_id = update["message"]["chat"]["id"]
+                if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
+                    send_stats()
+                    update_id = update["update_id"]
+                    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
+except:
+    pass
             else:
                 if position is not None:
                     logging.info("🔒 Position fermée")
@@ -516,8 +550,8 @@ def bot():
             if buy_score >= SCORE_SEUIL:
                 logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | probaTP:{buy_proba:.1f}% | indicateurs: {', '.join(buy_details)}")
             if sell_score >= SCORE_SEUIL:
-                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}")
-
+                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}") 
+                
                         # === GESTION POSITION ===
             if position is not None and entry_price > 0:
                 pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
