@@ -381,21 +381,6 @@ def bot():
                     entry_price = avg
                     logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
                     send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
-                    # === VÉRIFICATION DES COMMANDES TELEGRAM ===
-try:
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    resp = requests.get(url, timeout=5).json()
-    if resp.get("ok") and resp.get("result"):
-        for update in resp["result"]:
-            if "message" in update and "text" in update["message"]:
-                text = update["message"]["text"]
-                chat_id = update["message"]["chat"]["id"]
-                if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
-                    send_stats()
-                    update_id = update["update_id"]
-                    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
-except:
-    pass
             else:
                 if position is not None:
                     logging.info("🔒 Position fermée")
@@ -628,6 +613,21 @@ except:
                         entry_proba_tp = sell_proba
                         log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
                         send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
+                        # === VÉRIFICATION DES COMMANDES TELEGRAM ===
+try:
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    resp = requests.get(url, timeout=5).json()
+    if resp.get("ok") and resp.get("result"):
+        for update in resp["result"]:
+            if "message" in update and "text" in update["message"]:
+                text = update["message"]["text"]
+                chat_id = update["message"]["chat"]["id"]
+                if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
+                    send_stats()
+                    update_id = update["update_id"]
+                    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
+except:
+    pass
 
             time.sleep(30)
 
