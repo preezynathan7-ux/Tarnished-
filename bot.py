@@ -58,7 +58,7 @@ session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 # ============================================================
 
 def send_telegram(message):
-    def send_stats():
+def send_stats():
     try:
         with open(JOURNAL_FILE, "r") as f:
             lines = f.readlines()
