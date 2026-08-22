@@ -58,6 +58,13 @@ session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 # ============================================================
 
 def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logging.error(f"❌ Erreur envoi Telegram: {e}")
+        
 def send_stats():
     try:
         with open(JOURNAL_FILE, "r") as f:
@@ -77,13 +84,7 @@ def send_stats():
         send_telegram(msg)
     except:
         send_telegram("❌ Erreur lors de la lecture du journal.")
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        logging.error(f"❌ Erreur envoi Telegram: {e}")
-
+    
 # ============================================================
 #  JOURNAL ET PROBABILITÉ TP
 # ============================================================
