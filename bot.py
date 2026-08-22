@@ -32,7 +32,7 @@ RETOURNEMENT_RSI6 = 30
 RETOURNEMENT_STOCH = 20
 RETOURNEMENT_VOLUME_MA = 10
 
-ATR_THRESHOLD = 0.0007
+ATR_THRESHOLD = 0.00072
 VOLATILITY_PERIOD = 20
 
 POIDS_MACD = 0.6
@@ -482,10 +482,10 @@ except:
                 sell_score += POIDS_RSI
                 sell_details.append(f"RSI24({rsi24:.1f})")
 
-            if trend_bull and stoch_k < 20 and stoch_d < 20:
+            if trend_bull and stoch_k < 10 and stoch_d < 10:
                 buy_score += POIDS_STOCHRSI
                 buy_details.append("StochRSI")
-            elif trend_bear and stoch_k > 80 and stoch_d > 80:
+            elif trend_bear and stoch_k > 90 and stoch_d > 90:
                 sell_score += POIDS_STOCHRSI
                 sell_details.append("StochRSI")
 
