@@ -1,192 +1,80 @@
 from pybit.unified_trading import HTTP
+import requests
 import time
 import logging
 import os
-import math
-import requests
 from datetime import datetime
 
 # ============================================================
-#  CONFIGURATION
+#  CONFIGURATION – EMBER (VERSION FINALE)
 # ============================================================
 
 SYMBOLE = "BSBUSDT"
-TIMEFRAME = "15"
-LEVERAGE = 10
-TAILLE_POSITION_BSB = 200
-STOP_LOSS = 0.025
-TAKE_PROFIT = 0.075
-SCORE_SEUIL = 1.2
+TIMEFRAME = "30"
+LIMIT = 100
 
-API_KEY = os.getenv("API_KEY") or "yhIWArGAp0JwDLDja2"
-API_SECRET = os.getenv("API_SECRET") or "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
+CAPITAL_INITIAL = 7.0
+RISQUE_PAR_TRADE = 0.05
+LEVERAGE = 15
+STOP_LOSS = 0.035
+TAKE_PROFIT = 0.063
+COMMISSION = 0.0006
 
-# --- Telegram ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "7645348359"
-
-RSI6_OVERSOLD = 30
-RSI24_OVERBOUGHT = 62
-
-RETOURNEMENT_RSI6 = 30
-RETOURNEMENT_STOCH = 20
-RETOURNEMENT_VOLUME_MA = 10
-
-ATR_THRESHOLD = 0.00072
-VOLATILITY_PERIOD = 20
-
-POIDS_MACD = 0.6
-POIDS_EMA = 0.6
-POIDS_RSI = 0.6
-POIDS_STOCHRSI = 0.6
-POIDS_BOS = 0.6
-POIDS_VOLUME = 0.6
-POIDS_PSAR = 0.6
-POIDS_ATR = 0.6
-POIDS_STOCH = 0.6
-
+# === INDICATEURS ===
+RSI_OVERBOUGHT = 72
+RSI_OVERSOLD = 30
 VOLUME_SPIKE = 1.3
+SCORE_SEUIL = 3
+STOCH_OVERSOLD = 10
+STOCH_OVERBOUGHT = 90
 
-JOURNAL_FILE = "journal_trading.txt"
+# === FILTRES ===
+ATR_THRESHOLD = 0.0006
+FRAIS_BUFFER = 0.002
+TRAILING_ACTIVATE_PNL = 0.03 + FRAIS_BUFFER
+TRAILING_STEP = 0.4
+MAX_LOSS_USDT = 0.35
+
+# === OPTIMISATIONS RETENUES ===
+USE_TIME_FILTER = True
+USE_DRAWDOWN_PROTECTION = True
+USE_PYRAMID = True
+
+# === API BYBIT (DÉMO) ===
+API_KEY = "yhIWArGAp0JwDLDja2"       # ← REMPLACE ICI
+API_SECRET = "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"    # ← REMPLACE ICI
+
+# === TELEGRAM ===
+TELEGRAM_TOKEN = "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"      # ← REMPLACE ICI
+TELEGRAM_CHAT_ID = "7645348359"  # ← REMPLACE ICI
+
+JOURNAL_FILE = "journal_ember.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
+# === INITIALISATION BYBIT ===
+try:
+    session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
+    logging.info("✅ Connexion Bybit démo réussie")
+except Exception as e:
+    logging.error(f"❌ Échec de connexion Bybit: {e}")
+    exit(1)
 
 # ============================================================
-#  TELEGRAM
+#  FONCTIONS
 # ============================================================
 
-def send_telegram(message):
+def get_balance():
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=5)
+        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        if resp["result"]["list"]:
+            for coin in resp["result"]["list"][0]["coin"]:
+                if coin["coin"] == "USDT":
+                    return float(coin["walletBalance"])
+        return 0.0
     except Exception as e:
-        logging.error(f"❌ Erreur envoi Telegram: {e}")
-        
-def send_stats():
-    try:
-        with open(JOURNAL_FILE, "r") as f:
-            lines = f.readlines()
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_trades = [l for l in lines if today in l and "CLOSE" in l]
-        total = len(today_trades)
-        if total == 0:
-            send_telegram(f"📊 Aucun trade clôturé aujourd'hui ({today})")
-            return
-        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
-        win_rate = len(winning) / total * 100 if total > 0 else 0
-        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        msg = (f"📊 RÉSUMÉ DU {today}\n"
-               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
-               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
-        send_telegram(msg)
-    except:
-        send_telegram("❌ Erreur lors de la lecture du journal.")
-    
-# ============================================================
-#  JOURNAL ET PROBABILITÉ TP
-# ============================================================
-
-def log_trade(action, side, price, score, pnl=0, reason="", proba_tp=0):
-    try:
-        with open(JOURNAL_FILE, "a") as f:
-            f.write(f"{datetime.now().isoformat()} | {action} | {side} | {price:.6f} | score:{score:.2f} | P&L:{pnl:.2f} | probaTP:{proba_tp:.1f}% | {reason}\n")
-    except:
-        pass
-
-def calculate_tp_probability(ohlcv, entry_price, sl_price, tp_price):
-    if len(ohlcv) < VOLATILITY_PERIOD:
-        return 50.0
-    closes = [float(c[3]) for c in ohlcv[-VOLATILITY_PERIOD:]]
-    if len(closes) < 2:
-        return 50.0
-    returns = []
-    for i in range(1, len(closes)):
-        returns.append((closes[i] - closes[i-1]) / closes[i-1])
-    if not returns:
-        return 50.0
-    std_dev = math.sqrt(sum([r**2 for r in returns]) / len(returns))
-    daily_volatility = std_dev * 100
-    tp_distance = abs(tp_price - entry_price) / entry_price * 100
-    sl_distance = abs(sl_price - entry_price) / entry_price * 100
-    if sl_distance == 0:
-        return 50.0
-    ratio = tp_distance / sl_distance
-    if daily_volatility > tp_distance * 0.8:
-        prob = 70.0
-    elif daily_volatility > tp_distance * 0.5:
-        prob = 55.0
-    else:
-        prob = 40.0
-    if ratio > 2.5:
-        prob = min(prob * 0.8, 60)
-    elif ratio < 1.5:
-        prob = min(prob * 1.2, 85)
-    return max(5.0, min(95.0, prob))
-
-def print_daily_summary():
-    try:
-        with open(JOURNAL_FILE, "r") as f:
-            lines = f.readlines()
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_trades = [l for l in lines if today in l and "CLOSE" in l]
-        total = len(today_trades)
-        if total == 0:
-            msg = f"📊 Aucun trade clôturé aujourd'hui ({today})"
-            logging.info(msg)
-            send_telegram(msg)
-            return
-        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
-        win_rate = len(winning) / total * 100 if total > 0 else 0
-        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        msg = (f"📊 RÉSUMÉ DU {today}\n"
-               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
-               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
-        logging.info(msg)
-        send_telegram(msg)
-    except:
-        pass
-
-def collect_and_log_market_info(ohlcv):
-    if not ohlcv or len(ohlcv) < 50:
-        return
-    last = float(ohlcv[-1][3])
-    ema50 = get_ema(ohlcv, len(ohlcv)-1, 50)
-    ema200 = get_ema(ohlcv, len(ohlcv)-1, 200)
-    rsi6 = get_rsi(ohlcv, len(ohlcv)-1, 6)
-    rsi24 = get_rsi(ohlcv, len(ohlcv)-1, 24)
-    atr = get_atr(ohlcv, len(ohlcv)-1, 14)
-    vol_ma = get_volume_ma(ohlcv, len(ohlcv)-1, 20)
-    current_volume = float(ohlcv[-1][4])
-    vol_spike = current_volume / vol_ma if vol_ma and vol_ma > 0 else 1.0
-
-    if ema50 is not None and ema200 is not None:
-        trend = "HAUSSIÈRE" if ema50 > ema200 else "BAISSIÈRE"
-    else:
-        trend = "INCONNUE"
-
-    logging.info("="*50)
-    logging.info("📊 ANALYSE MARCHÉ (collecte horaire)")
-    logging.info(f"💰 Prix: {last:.6f}")
-    logging.info(f"📈 Tendance: {trend}")
-    if ema50 is not None:
-        logging.info(f"   EMA50: {ema50:.6f}")
-    else:
-        logging.info("   EMA50: indisponible")
-    if ema200 is not None:
-        logging.info(f"   EMA200: {ema200:.6f}")
-    else:
-        logging.info("   EMA200: indisponible")
-    logging.info(f"📉 RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
-    logging.info(f"📊 ATR: {atr:.6f}" if atr is not None else "📊 ATR: indisponible")
-    logging.info(f"📊 Volume spike: {vol_spike:.2f}x")
-    logging.info("="*50)
-
-# ============================================================
-#  INDICATEURS
-# ============================================================
+        logging.error(f"❌ Erreur solde: {e}")
+        return 0.0
 
 def get_current_price():
     tickers = session.get_tickers(category="linear", symbol=SYMBOLE)
@@ -196,116 +84,17 @@ def get_ohlcv(limit=100):
     data = session.get_kline(category="linear", symbol=SYMBOLE, interval=15, limit=limit)
     return data["result"]["list"]
 
-def get_rsi(ohlcv, index, period=14):
-    if index < period + 1:
-        return 50
-    closes = [float(c[3]) for c in ohlcv[:index+1]]
-    gains, losses = 0, 0
-    for i in range(1, period + 1):
-        diff = closes[-i] - closes[-i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses += abs(diff)
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
-        return 100
-    return 100 - (100 / (1 + avg_gain / avg_loss))
-
-def get_ema(ohlcv, index, period):
-    if index < period:
-        return None
-    closes = [float(c[3]) for c in ohlcv[:index+1]]
-    alpha = 2 / (period + 1)
-    result = [closes[0]]
-    for v in closes[1:]:
-        result.append(alpha * v + (1 - alpha) * result[-1])
-    return result[-1]
-
-def get_macd(ohlcv, index):
-    if index < 26:
-        return None, None
-    e12 = get_ema(ohlcv, index, 12)
-    e26 = get_ema(ohlcv, index, 26)
-    if e12 is None or e26 is None:
-        return None, None
-    macd = e12 - e26
-    signal = e12 * 0.15 + e26 * 0.85
-    return macd, signal
-
-def get_stoch_rsi(ohlcv, index, period=14):
-    if index < period + 1:
-        return 50, 50
-    rsi_values = []
-    for i in range(index - period, index + 1):
-        rsi_values.append(get_rsi(ohlcv, i, period))
-    if not rsi_values:
-        return 50, 50
-    mn, mx = min(rsi_values), max(rsi_values)
-    if mx == mn:
-        return 50, 50
-    stoch = (rsi_values[-1] - mn) / (mx - mn)
-    return stoch * 100, stoch * 100
-
-def get_stoch(ohlcv, index, k_period=14, d_period=3):
-    if index < k_period + d_period:
-        return 50, 50
-    closes = [float(c[3]) for c in ohlcv[index-k_period+1:index+1]]
-    lows = [float(c[2]) for c in ohlcv[index-k_period+1:index+1]]
-    highs = [float(c[1]) for c in ohlcv[index-k_period+1:index+1]]
-    lowest = min(lows)
-    highest = max(highs)
-    if highest == lowest:
-        return 50, 50
-    k = 100 * (closes[-1] - lowest) / (highest - lowest)
-    d = k
-    return k, d
-
-def get_psar(ohlcv, index, step=0.02, max_step=0.2):
-    if index < 2:
-        return None
-    high = float(ohlcv[index][1])
-    low = float(ohlcv[index][2])
-    prev_high = float(ohlcv[index-1][1])
-    prev_low = float(ohlcv[index-1][2])
-    if high > prev_high:
-        return prev_low * (1 - step)
-    else:
-        return prev_high * (1 + step)
-
-def get_atr(ohlcv, index, period=14):
-    if index < period:
-        return None
-    true_ranges = []
-    for i in range(index - period + 1, index + 1):
-        high = float(ohlcv[i][1])
-        low = float(ohlcv[i][2])
-        prev_close = float(ohlcv[i-1][3]) if i > 0 else low
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        true_ranges.append(tr)
-    return sum(true_ranges) / len(true_ranges)
-
-def detect_bos(ohlcv, index):
-    if index < 5:
-        return False, False
-    highs = [float(c[1]) for c in ohlcv[index-5:index]]
-    lows = [float(c[2]) for c in ohlcv[index-5:index]]
-    return float(ohlcv[index][1]) > max(highs), float(ohlcv[index][2]) < min(lows)
-
-def get_volume_ma(ohlcv, index, period=20):
-    if index < period:
-        return None
-    volumes = [float(c[4]) for c in ohlcv[index-period:index]]
-    return sum(volumes) / len(volumes)
-
 def get_position():
-    pos = session.get_positions(category="linear", symbol=SYMBOLE)
-    if pos["result"]["list"]:
-        p = pos["result"]["list"][0]
-        if float(p["size"]) != 0:
-            return p["side"].lower(), float(p["size"]), float(p["avgPrice"])
-    return None, 0, 0
+    try:
+        pos = session.get_positions(category="linear", symbol=SYMBOLE)
+        if pos["result"]["list"]:
+            p = pos["result"]["list"][0]
+            if float(p["size"]) != 0:
+                return p["side"].lower(), float(p["size"]), float(p["avgPrice"])
+        return None, 0, 0
+    except Exception as e:
+        logging.error(f"❌ Erreur get_position: {e}")
+        return None, 0, 0
 
 def create_order(side, qty):
     try:
@@ -326,45 +115,211 @@ def close_position(side, qty):
     opp = "Buy" if side == "sell" else "Sell"
     return create_order(opp, qty)
 
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logging.error(f"❌ Erreur envoi Telegram: {e}")
+
+def log_trade(action, side, price, score, pnl=0, reason=""):
+    try:
+        with open(JOURNAL_FILE, "a") as f:
+            f.write(f"{datetime.now().isoformat()} | {action} | {side} | {price:.6f} | score:{score:.2f} | P&L:{pnl:.2f} | {reason}\n")
+    except:
+        pass
+
+def send_stats():
+    """Envoie les statistiques du jour sur Telegram"""
+    try:
+        with open(JOURNAL_FILE, "r") as f:
+            lines = f.readlines()
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_trades = [l for l in lines if today in l and "CLOSE" in l]
+        total = len(today_trades)
+        if total == 0:
+            send_telegram(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            return
+        winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
+        win_rate = len(winning) / total * 100 if total > 0 else 0
+        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
+        msg = (f"🔥 EMBER – RÉSUMÉ DU {today}\n"
+               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
+               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
+        send_telegram(msg)
+    except Exception as e:
+        send_telegram(f"❌ Erreur lors de la lecture du journal: {e}")
+
+def check_telegram_commands():
+    """Vérifie les commandes Telegram (/stats)"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        resp = requests.get(url, timeout=5).json()
+        if resp.get("ok") and resp.get("result"):
+            for update in resp["result"]:
+                if "message" in update and "text" in update["message"]:
+                    text = update["message"]["text"]
+                    chat_id = update["message"]["chat"]["id"]
+                    if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
+                        send_stats()
+                        # Marquer l'update comme lu
+                        update_id = update["update_id"]
+                        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
+    except Exception as e:
+        logging.error(f"❌ Erreur check_telegram_commands: {e}")
+
+# === INDICATEURS ===
+def get_rsi(ohlcv, index, period=14):
+    if index < period + 1:
+        return 50
+    closes = [float(c[3]) for c in ohlcv[:index+1]]
+    gains, losses = 0, 0
+    for i in range(1, period + 1):
+        diff = closes[-i] - closes[-i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses += abs(diff)
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def get_ema(ohlcv, index, period):
+    if index < period:
+        return None
+    closes = [float(c[3]) for c in ohlcv[:index+1]]
+    alpha = 2 / (period + 1)
+    result = [closes[0]]
+    for v in closes[1:]:
+        result.append(alpha * v + (1 - alpha) * result[-1])
+    return result[-1]
+
+def get_macd(ohlcv, index):
+    if index < 26:
+        return None, None
+    ema12 = get_ema(ohlcv, index, 12)
+    ema26 = get_ema(ohlcv, index, 26)
+    if ema12 is None or ema26 is None:
+        return None, None
+    macd = ema12 - ema26
+    signal = ema12 * 0.15 + ema26 * 0.85
+    return macd, signal
+
+def get_stoch_rsi(ohlcv, index, period=14):
+    if index < period + 1:
+        return 50, 50
+    rsi_values = []
+    for i in range(index - period, index + 1):
+        rsi_values.append(get_rsi(ohlcv, i, period))
+    if not rsi_values:
+        return 50, 50
+    min_rsi = min(rsi_values)
+    max_rsi = max(rsi_values)
+    if max_rsi == min_rsi:
+        return 50, 50
+    stoch = (rsi_values[-1] - min_rsi) / (max_rsi - min_rsi)
+    return stoch * 100, stoch * 100
+
+def detect_bos(ohlcv, index):
+    if index < 5:
+        return False, False
+    highs = [float(c[1]) for c in ohlcv[index-5:index]]
+    lows = [float(c[2]) for c in ohlcv[index-5:index]]
+    current_high = float(ohlcv[index][1])
+    current_low = float(ohlcv[index][2])
+    return current_high > max(highs), current_low < min(lows)
+
+def detect_choch(ohlcv, index):
+    if index < 6:
+        return False, False
+    highs = [float(c[1]) for c in ohlcv[index-6:index]]
+    lows = [float(c[2]) for c in ohlcv[index-6:index]]
+    closes = [float(c[3]) for c in ohlcv[:index+1]]
+    current_close = closes[-1]
+    return current_close > max(highs), current_close < min(lows)
+
+def detect_fvg(ohlcv, index):
+    if index < 3:
+        return False, False
+    high_2 = float(ohlcv[index-3][1])
+    low_2 = float(ohlcv[index-3][2])
+    high_0 = float(ohlcv[index][1])
+    low_0 = float(ohlcv[index][2])
+    return low_0 > high_2, high_0 < low_2
+
+def get_volume_ma(ohlcv, index, period=20):
+    if index < period:
+        return None
+    volumes = [float(c[4]) for c in ohlcv[index-period:index]]
+    return sum(volumes) / len(volumes)
+
+def get_atr(ohlcv, index, period=14):
+    if index < period:
+        return None
+    true_ranges = []
+    for i in range(index - period + 1, index + 1):
+        high = float(ohlcv[i][1])
+        low = float(ohlcv[i][2])
+        prev_close = float(ohlcv[i-1][3]) if i > 0 else low
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    return sum(true_ranges) / len(true_ranges)
+
+def time_filter(timestamp):
+    dt = datetime.fromtimestamp(int(timestamp)/1000)
+    hour = dt.hour + 1
+    if hour >= 24:
+        hour -= 24
+    return 8 <= hour <= 22
+
 # ============================================================
-#  BOUCLE PRINCIPALE – GAMBIT
+#  BOUCLE PRINCIPALE – EMBER (LIVE)
 # ============================================================
 
 def bot():
-    logging.info("🤖 Bot 'Gambit' démarré (mode démo)")
-    logging.info(f"📊 Symbole: {SYMBOLE} | Levier: {LEVERAGE}x | Position: {TAILLE_POSITION_BSB} BSB")
-    logging.info(f"📈 Seuil: {SCORE_SEUIL} | Poids MACD: {POIDS_MACD} (égal aux autres)")
-    logging.info(f"🔄 Règle de retournement fort: RSI6 < {RETOURNEMENT_RSI6} + StochRSI < {RETOURNEMENT_STOCH} + Volume > MA{RETOURNEMENT_VOLUME_MA}")
-    logging.info(f"⏳ Filtre ATR: seuil = {ATR_THRESHOLD} (bloque les marchés calmes)")
+    logging.info("🔥 Bot 'EMBER' – LIVE (démo) – Version finale (trailing % fixe)")
+    send_telegram("🔥 Bot 'EMBER' – LIVE (démo) – Version finale")
 
     position = None
     entry_price = 0
     entry_score = 0.0
-    entry_proba_tp = 0.0
-    last_daily_log = datetime.now().date()
-    last_hourly_collect = datetime.now().hour
+    trailing_sl_price = 0
+    qty_position = 0
+    capital_peak = 0.0
+    pyramide_active = False
 
-    # --- REPRISE DES POSITIONS AU DÉMARRAGE ---
     side, qty, avg = get_position()
     if side is not None:
         position = side
         entry_price = avg
+        qty_position = qty
+        capital_peak = get_balance()
         logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
         send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
 
     while True:
         try:
-            today = datetime.now().date()
-            if today != last_daily_log:
-                print_daily_summary()
-                last_daily_log = today
+            # Vérification des commandes Telegram
+            check_telegram_commands()
 
-            current_hour = datetime.now().hour
-            if current_hour != last_hourly_collect:
-                ohlcv_temp = get_ohlcv(100)
-                if ohlcv_temp and len(ohlcv_temp) >= 30:
-                    collect_and_log_market_info(ohlcv_temp)
-                last_hourly_collect = current_hour
+            capital = get_balance()
+            if capital <= 0:
+                logging.warning("⚠️ Solde à zéro, on attend...")
+                time.sleep(30)
+                continue
+
+            if capital_peak == 0:
+                capital_peak = capital
+
+            drawdown_protection = False
+            if USE_DRAWDOWN_PROTECTION and capital < capital_peak * 0.9:
+                drawdown_protection = True
+                logging.info(f"🛡️ Drawdown > 10% – réduction de taille active")
+                send_telegram(f"🛡️ Drawdown > 10% – réduction de taille active")
 
             ohlcv = get_ohlcv(100)
             if not ohlcv or len(ohlcv) < 30:
@@ -372,13 +327,18 @@ def bot():
                 continue
 
             price = get_current_price()
+            current_time = int(ohlcv[-1][0])
 
-            # Vérifier la position en temps réel
+            if USE_TIME_FILTER and not time_filter(current_time):
+                time.sleep(30)
+                continue
+
             side, qty, avg = get_position()
             if side is not None:
                 if position is None:
                     position = side
                     entry_price = avg
+                    qty_position = qty
                     logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
                     send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
             else:
@@ -387,29 +347,94 @@ def bot():
                     position = None
                     entry_price = 0
                     entry_score = 0.0
-                    entry_proba_tp = 0.0
+                    trailing_sl_price = 0
+                    qty_position = 0
+                    pyramide_active = False
 
             i = len(ohlcv) - 1
 
-            rsi6 = get_rsi(ohlcv, i, 6)
-            rsi24 = get_rsi(ohlcv, i, 24)
-
+            rsi = get_rsi(ohlcv, i)
             ema50 = get_ema(ohlcv, i, 50)
             ema200 = get_ema(ohlcv, i, 200)
             macd, signal = get_macd(ohlcv, i)
             stoch_k, stoch_d = get_stoch_rsi(ohlcv, i)
-            stoch_k2, stoch_d2 = get_stoch(ohlcv, i)
-            psar = get_psar(ohlcv, i)
-            atr = get_atr(ohlcv, i)
             vol_ma = get_volume_ma(ohlcv, i, 20)
             bos_h, bos_b = detect_bos(ohlcv, i)
-            current_volume = float(ohlcv[i][4])
+            choch_h, choch_b = detect_choch(ohlcv, i)
+            fvg_h, fvg_b = detect_fvg(ohlcv, i)
+            atr = get_atr(ohlcv, i)
 
+            # --- GESTION POSITION ---
+            if position is not None and entry_price > 0:
+                pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
+                pnl *= LEVERAGE
+
+                sl_price = entry_price * (1 - STOP_LOSS) if position == 'buy' else entry_price * (1 + STOP_LOSS)
+                tp_price = entry_price * (1 + TAKE_PROFIT) if position == 'buy' else entry_price * (1 - TAKE_PROFIT)
+
+                # Trailing % fixe
+                if trailing_sl_price == 0 and pnl >= TRAILING_ACTIVATE_PNL:
+                    if position == 'buy':
+                        trailing_sl_price = entry_price * (1 + FRAIS_BUFFER)
+                    else:
+                        trailing_sl_price = entry_price * (1 - FRAIS_BUFFER)
+                    logging.info(f"🔒 Trailing % activé à {trailing_sl_price:.4f}")
+                    send_telegram(f"🔒 Trailing % activé à {trailing_sl_price:.4f}")
+
+                if trailing_sl_price != 0:
+                    if position == 'buy' and price > entry_price:
+                        new_sl = entry_price + (price - entry_price) * TRAILING_STEP
+                        if new_sl > trailing_sl_price:
+                            trailing_sl_price = new_sl
+                    elif position == 'sell' and price < entry_price:
+                        new_sl = entry_price - (entry_price - price) * TRAILING_STEP
+                        if new_sl < trailing_sl_price:
+                            trailing_sl_price = new_sl
+
+                reason = None
+                if position == 'buy':
+                    if price <= sl_price:
+                        reason = 'SL'
+                    elif price >= tp_price:
+                        reason = 'TP'
+                    elif trailing_sl_price != 0 and price <= trailing_sl_price:
+                        reason = 'TRAILING'
+                else:
+                    if price >= sl_price:
+                        reason = 'SL'
+                    elif price <= tp_price:
+                        reason = 'TP'
+                    elif trailing_sl_price != 0 and price >= trailing_sl_price:
+                        reason = 'TRAILING'
+
+                if reason:
+                    valeur_position = qty_position * entry_price / LEVERAGE
+                    pnl_usdt = pnl * valeur_position
+                    pnl_usdt_net = pnl_usdt - COMMISSION * valeur_position
+
+                    if pnl_usdt_net < -MAX_LOSS_USDT:
+                        pnl_usdt_net = -MAX_LOSS_USDT
+                        reason = f"{reason} (limité)"
+
+                    msg = f"🔻 {reason} à {price:.6f} | P&L: {pnl_usdt_net:.2f} USDT ({pnl*100:.2f}%)"
+                    logging.info(msg)
+                    send_telegram(msg)
+                    close_position(position, qty_position)
+                    log_trade("CLOSE", position, price, entry_score, pnl_usdt_net, reason)
+                    position = None
+                    entry_price = 0
+                    entry_score = 0.0
+                    trailing_sl_price = 0
+                    qty_position = 0
+                    pyramide_active = False
+                    continue
+
+            # --- FILTRE ATR ---
             if atr is not None and atr < ATR_THRESHOLD:
-                logging.info(f"⏳ Marché en range (ATR={atr:.6f} < {ATR_THRESHOLD}) → pas de trade")
                 time.sleep(30)
                 continue
 
+            # --- TENDANCE ---
             if ema50 is not None and ema200 is not None:
                 trend_bull = ema50 > ema200
                 trend_bear = ema50 < ema200
@@ -417,100 +442,63 @@ def bot():
                 trend_bull = False
                 trend_bear = False
 
-            psar_bull = price > psar if psar is not None else False
-            psar_bear = price < psar if psar is not None else False
-
+            # --- SCORE ---
             buy_score = 0.0
             sell_score = 0.0
             buy_details = []
             sell_details = []
 
-            retournement_bull = (
-                rsi6 < RETOURNEMENT_RSI6 and
-                stoch_k < RETOURNEMENT_STOCH and
-                stoch_d < RETOURNEMENT_STOCH and
-                current_volume > vol_ma * (RETOURNEMENT_VOLUME_MA / 10) if vol_ma is not None else False
-            )
-            retournement_bear = (
-                rsi24 > 60 and
-                stoch_k > 80 and
-                stoch_d > 80 and
-                current_volume > vol_ma * (RETOURNEMENT_VOLUME_MA / 10) if vol_ma is not None else False
-            )
-
-            if retournement_bull:
+            if rsi < RSI_OVERSOLD:
                 buy_score += 1.0
-                buy_details.append("RETOURNEMENT")
-            if retournement_bear:
+                buy_details.append("RSI")
+            elif rsi > RSI_OVERBOUGHT:
                 sell_score += 1.0
-                sell_details.append("RETOURNEMENT")
-
-            if macd is not None and signal is not None:
-                if macd > signal:
-                    buy_score += POIDS_MACD
-                    buy_details.append("MACD")
-                else:
-                    sell_score += POIDS_MACD
-                    sell_details.append("MACD")
+                sell_details.append("RSI")
 
             if ema50 is not None:
                 if price > ema50:
-                    buy_score += POIDS_EMA
+                    buy_score += 1.0
                     buy_details.append("EMA")
                 else:
-                    sell_score += POIDS_EMA
+                    sell_score += 1.0
                     sell_details.append("EMA")
 
-            if trend_bull and rsi6 < RSI6_OVERSOLD:
-                buy_score += POIDS_RSI
-                buy_details.append(f"RSI6({rsi6:.1f})")
-            elif trend_bear and rsi24 < RSI24_OVERBOUGHT:
-                sell_score += POIDS_RSI
-                sell_details.append(f"RSI24({rsi24:.1f})")
+            if macd is not None and signal is not None:
+                if macd > signal:
+                    buy_score += 1.0
+                    buy_details.append("MACD")
+                else:
+                    sell_score += 1.0
+                    sell_details.append("MACD")
 
-            if trend_bull and stoch_k < 10 and stoch_d < 10:
-                buy_score += POIDS_STOCHRSI
+            if stoch_k < STOCH_OVERSOLD and stoch_d < STOCH_OVERSOLD:
+                buy_score += 1.0
                 buy_details.append("StochRSI")
-            elif trend_bear and stoch_k > 90 and stoch_d > 90:
-                sell_score += POIDS_STOCHRSI
+            elif stoch_k > STOCH_OVERBOUGHT and stoch_d > STOCH_OVERBOUGHT:
+                sell_score += 1.0
                 sell_details.append("StochRSI")
 
-            if trend_bull and bos_h:
-                buy_score += POIDS_BOS
-                buy_details.append("BOS")
-            elif trend_bear and bos_b:
-                sell_score += POIDS_BOS
-                sell_details.append("BOS")
-
-            if vol_ma is not None and current_volume > vol_ma * VOLUME_SPIKE:
+            if vol_ma is not None and float(ohlcv[i][4]) > vol_ma * VOLUME_SPIKE:
                 if buy_score > 0:
-                    buy_score += POIDS_VOLUME
+                    buy_score += 1.0
                     buy_details.append("Vol")
                 elif sell_score > 0:
-                    sell_score += POIDS_VOLUME
+                    sell_score += 1.0
                     sell_details.append("Vol")
 
-            if trend_bull and psar_bull:
-                buy_score += POIDS_PSAR
-                buy_details.append("PSAR")
-            elif trend_bear and psar_bear:
-                sell_score += POIDS_PSAR
-                sell_details.append("PSAR")
+            if bos_h or choch_h:
+                buy_score += 1.0
+                buy_details.append("BOS/CHoCH")
+            if bos_b or choch_b:
+                sell_score += 1.0
+                sell_details.append("BOS/CHoCH")
 
-            if atr is not None and atr > ATR_THRESHOLD * 2:
-                if buy_score > 0:
-                    buy_score += POIDS_ATR
-                    buy_details.append("ATR")
-                elif sell_score > 0:
-                    sell_score += POIDS_ATR
-                    sell_details.append("ATR")
-
-            if trend_bull and stoch_k2 < 20 and stoch_d2 < 20:
-                buy_score += POIDS_STOCH
-                buy_details.append("Stoch")
-            elif trend_bear and stoch_k2 > 80 and stoch_d2 > 80:
-                sell_score += POIDS_STOCH
-                sell_details.append("Stoch")
+            if fvg_h:
+                buy_score += 1.0
+                buy_details.append("FVG")
+            if fvg_b:
+                sell_score += 1.0
+                sell_details.append("FVG")
 
             if trend_bull and sell_score > 0:
                 sell_score = 0
@@ -519,124 +507,66 @@ def bot():
                 buy_score = 0
                 buy_details = []
 
-            buy_proba = 50.0
-            sell_proba = 50.0
-            sl_price_buy = price * (1 - STOP_LOSS)
-            tp_price_buy = price * (1 + TAKE_PROFIT)
-            sl_price_sell = price * (1 + STOP_LOSS)
-            tp_price_sell = price * (1 - TAKE_PROFIT)
-
+            signal_side = None
             if buy_score >= SCORE_SEUIL:
-                buy_proba = calculate_tp_probability(ohlcv, price, sl_price_buy, tp_price_buy)
-            if sell_score >= SCORE_SEUIL:
-                sell_proba = calculate_tp_probability(ohlcv, price, sl_price_sell, tp_price_sell)
+                signal_side = 'buy'
+                signal_score = buy_score
+                signal_details = buy_details
+            elif sell_score >= SCORE_SEUIL:
+                signal_side = 'sell'
+                signal_score = sell_score
+                signal_details = sell_details
 
-            logging.info(f"📊 DEBUG - buy: {buy_score:.2f} | sell: {sell_score:.2f} | seuil: {SCORE_SEUIL:.2f} | RSI6: {rsi6:.1f} | RSI24: {rsi24:.1f}")
+            # ============================================================
+#  NOUVELLE ENTRÉE (POSITION IS NONE) + BOUCLE PRINCIPALE
+# ============================================================
 
-            if buy_score >= SCORE_SEUIL:
-                logging.info(f"📊 SIGNAL BUY | score:{buy_score:.2f} | probaTP:{buy_proba:.1f}% | indicateurs: {', '.join(buy_details)}")
-            if sell_score >= SCORE_SEUIL:
-                logging.info(f"📊 SIGNAL SELL | score:{sell_score:.2f} | probaTP:{sell_proba:.1f}% | indicateurs: {', '.join(sell_details)}") 
-                
-                        # === GESTION POSITION ===
-            if position is not None and entry_price > 0:
-                pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
-                pnl *= LEVERAGE
+            # --- PYRAMIDE (si position déjà ouverte) ---
+            if USE_PYRAMID and position is not None and not pyramide_active:
+                pnl_actuel = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
+                if pnl_actuel * 100 >= 3:
+                    risque = RISQUE_PAR_TRADE * 0.5 if drawdown_protection else RISQUE_PAR_TRADE
+                    risque_usdt = capital * risque
+                    distance_sl = price * STOP_LOSS
+                    qty_add = risque_usdt / distance_sl
+                    qty_add = qty_add / LEVERAGE
+                    qty_add = max(1, int(qty_add * 1.1) // 2)
+                    if qty_add > 0:
+                        if create_order(position, qty_add):
+                            qty_position += qty_add
+                            pyramide_active = True
+                            logging.info(f"🔺 Pyramide ajoutée: +{qty_add} BSB à {price:.4f}")
+                            send_telegram(f"🔺 Pyramide ajoutée: +{qty_add} BSB à {price:.4f}")
 
-                if pnl <= -STOP_LOSS:
-                    msg = f"🔻 SL à {price:.6f} | P&L: {pnl*100:.2f}%"
+            # --- NOUVELLE ENTRÉE (position is None) ---
+            if position is None and signal_side is not None:
+                risque = RISQUE_PAR_TRADE * 0.5 if drawdown_protection else RISQUE_PAR_TRADE
+                risque_usdt = capital * risque
+                distance_sl = price * STOP_LOSS
+                qty = risque_usdt / distance_sl
+                qty = qty / LEVERAGE
+                qty = max(1, int(qty * 1.1))
+
+                if create_order(signal_side, qty):
+                    position = signal_side
+                    entry_price = price
+                    entry_score = signal_score
+                    qty_position = qty
+                    trailing_sl_price = 0
+                    pyramide_active = False
+                    log_trade("OPEN", signal_side, price, signal_score, 0, "NEW")
+                    msg = f"🔥 {signal_side.upper()} EMBER – ouvert à {price:.6f} | Score: {entry_score:.2f} | Qty: {qty} BSB | Capital: {capital:.2f} USDT | indicateurs: {', '.join(signal_details)}"
                     logging.info(msg)
                     send_telegram(msg)
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "SL", entry_proba_tp)
-                    position = None
-                    entry_price = 0
-                    entry_score = 0.0
-                    entry_proba_tp = 0.0
-                    continue
-                elif pnl >= TAKE_PROFIT:
-                    msg = f"🔺 TP à {price:.6f} | P&L: {pnl*100:.2f}%"
-                    logging.info(msg)
-                    send_telegram(msg)
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "TP", entry_proba_tp)
-                    position = None
-                    entry_price = 0
-                    entry_score = 0.0
-                    entry_proba_tp = 0.0
-                    continue
-
-                if position == 'buy' and sell_score > entry_score * 1.5:
-                    msg = f"🔄 INVERSION: sell_score ({sell_score:.2f}) > {entry_score:.2f} * 1.5"
-                    logging.info(msg)
-                    send_telegram(msg)
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                    if create_order('sell', TAILLE_POSITION_BSB):
-                        position = 'sell'
-                        entry_price = price
-                        entry_score = sell_score
-                        entry_proba_tp = sell_proba
-                        log_trade("OPEN", 'sell', price, sell_score, 0, "INVERSION_OPEN", sell_proba)
-                        send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
-                    continue
-                elif position == 'sell' and buy_score > entry_score * 1.5:
-                    msg = f"🔄 INVERSION: buy_score ({buy_score:.2f}) > {entry_score:.2f} * 1.5"
-                    logging.info(msg)
-                    send_telegram(msg)
-                    close_position(position, qty)
-                    log_trade("CLOSE", position, price, entry_score, pnl, "INVERSION_CLOSE", entry_proba_tp)
-                    if create_order('buy', TAILLE_POSITION_BSB):
-                        position = 'buy'
-                        entry_price = price
-                        entry_score = buy_score
-                        entry_proba_tp = buy_proba
-                        log_trade("OPEN", 'buy', price, buy_score, 0, "INVERSION_OPEN", buy_proba)
-                        send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
-                    continue
-
-                        # === NOUVELLE ENTRÉE ===
-            if position is None:
-                if buy_score >= SCORE_SEUIL:
-                    if create_order('buy', TAILLE_POSITION_BSB):
-                        position = 'buy'
-                        entry_price = price
-                        entry_score = buy_score
-                        entry_proba_tp = buy_proba
-                        log_trade("OPEN", 'buy', price, buy_score, 0, "NEW", buy_proba)
-                        send_telegram(f"🟢 BUY ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_buy:.6f} | SL: {sl_price_buy:.6f}")
-                elif sell_score >= SCORE_SEUIL:
-                    if create_order('sell', TAILLE_POSITION_BSB):
-                        position = 'sell'
-                        entry_price = price
-                        entry_score = sell_score
-                        entry_proba_tp = sell_proba
-                        log_trade("OPEN", 'sell', price, sell_score, 0, "NEW", sell_proba)
-                        send_telegram(f"🟢 SELL ouvert à {price:.6f} | Score: {entry_score:.2f} | TP: {tp_price_sell:.6f} | SL: {sl_price_sell:.6f}")
-
-            # === VÉRIFICATION DES COMMANDES TELEGRAM ===
-            try:
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-                resp = requests.get(url, timeout=5).json()
-                if resp.get("ok") and resp.get("result"):
-                    for update in resp["result"]:
-                        if "message" in update and "text" in update["message"]:
-                            text = update["message"]["text"]
-                            chat_id = update["message"]["chat"]["id"]
-                            if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
-                                send_stats()
-                                update_id = update["update_id"]
-                                requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
-            except:
-                pass
 
             time.sleep(30)
 
         except Exception as e:
-            error_msg = f"❌ Erreur critique: {e}"
+            error_msg = f"❌ Erreur critique (EMBER): {e}"
             logging.error(error_msg)
             send_telegram(error_msg)
             time.sleep(60)
 
 if __name__ == "__main__":
     bot()
+        
