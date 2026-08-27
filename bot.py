@@ -1,158 +1,115 @@
-from pybit.unified_trading import HTTP
-import requests
+# ============================================================
+# NEXUS Trading Bot - Version Complète
+# Bybit Demo | 30m | BSBUSDT
+# Logique V4 + Score validé
+# ============================================================
+
 import time
 import logging
+import math
 import os
 from datetime import datetime
+from pybit.unified_trading import HTTP
+import requests
 
 # ============================================================
-#  CONFIGURATION – EMBER (VERSION FINALE)
+#  CONFIGURATION
 # ============================================================
 
-SYMBOLE = "BSBUSDT"
+API_KEY = "yhIWArGAp0JwDLDja2"
+API_SECRET = "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"
+
+TELEGRAM_TOKEN = "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"
+TELEGRAM_CHAT_ID = "7645348359"
+
+SYMBOL = "BSBUSDT"
 TIMEFRAME = "30"
-LIMIT = 100
+LEVERAGE = 10
+RISK_PER_TRADE = 0.02
+MAX_DAILY_LOSS_PCT = 0.06
 
-CAPITAL_INITIAL = 7.0
-RISQUE_PAR_TRADE = 0.05
-LEVERAGE = 15
-STOP_LOSS = 0.035
-TAKE_PROFIT = 0.063
-COMMISSION = 0.0006
+# Risk / Reward (V4)
+SL_ATR_MULT = 2.7
+RR_RATIO = 2.4
 
-# === INDICATEURS ===
-RSI_OVERBOUGHT = 72
-RSI_OVERSOLD = 30
-VOLUME_SPIKE = 1.3
-SCORE_SEUIL = 3
-STOCH_OVERSOLD = 10
-STOCH_OVERBOUGHT = 90
+# Score
+SCORE_MIN = 3.8
+SCORE_MIN_CONTRE = 5.3
 
-# === FILTRES ===
-ATR_THRESHOLD = 0.0006
-FRAIS_BUFFER = 0.002
-TRAILING_ACTIVATE_PNL = 0.03 + FRAIS_BUFFER
-TRAILING_STEP = 0.4
-MAX_LOSS_USDT = 0.35
-
-# === OPTIMISATIONS RETENUES ===
-USE_TIME_FILTER = True
-USE_DRAWDOWN_PROTECTION = True
-USE_PYRAMID = True
-
-# === API BYBIT (DÉMO) ===
-API_KEY = "yhIWArGAp0JwDLDja2"       # ← REMPLACE ICI
-API_SECRET = "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"    # ← REMPLACE ICI
-
-# === TELEGRAM ===
-TELEGRAM_TOKEN = "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"      # ← REMPLACE ICI
-TELEGRAM_CHAT_ID = "7645348359"  # ← REMPLACE ICI
-
-JOURNAL_FILE = "journal_ember.txt"
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# === INITIALISATION BYBIT ===
-try:
-    session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
-    logging.info("✅ Connexion Bybit démo réussie")
-except Exception as e:
-    logging.error(f"❌ Échec de connexion Bybit: {e}")
-    exit(1)
+JOURNAL_FILE = "journal_nexus.txt"
 
 # ============================================================
-#  FONCTIONS
+#  INIT
 # ============================================================
 
-def get_balance():
-    try:
-        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        if resp["result"]["list"]:
-            for coin in resp["result"]["list"][0]["coin"]:
-                if coin["coin"] == "USDT":
-                    return float(coin["walletBalance"])
-        return 0.0
-    except Exception as e:
-        logging.error(f"❌ Erreur solde: {e}")
-        return 0.0
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 
-def get_current_price():
-    tickers = session.get_tickers(category="linear", symbol=SYMBOLE)
-    return float(tickers["result"]["list"][0]["lastPrice"])
+session = HTTP(
+    testnet=False,
+    demo=True,
+    api_key=API_KEY,
+    api_secret=API_SECRET
+)
 
-def get_ohlcv(limit=100):
-    data = session.get_kline(category="linear", symbol=SYMBOLE, interval=15, limit=limit)
-    return data["result"]["list"]
+capital = 0.0
+daily_start_capital = 0.0
+open_position = None
+last_trade_time = 0
+capital_peak = 0.0
 
-def get_position():
-    try:
-        pos = session.get_positions(category="linear", symbol=SYMBOLE)
-        if pos["result"]["list"]:
-            p = pos["result"]["list"][0]
-            if float(p["size"]) != 0:
-                return p["side"].lower(), float(p["size"]), float(p["avgPrice"])
-        return None, 0, 0
-    except Exception as e:
-        logging.error(f"❌ Erreur get_position: {e}")
-        return None, 0, 0
+# ============================================================
+#  TELEGRAM + JOURNAL
+# ============================================================
 
-def create_order(side, qty):
-    try:
-        session.place_order(
-            category="linear",
-            symbol=SYMBOLE,
-            side=side.capitalize(),
-            orderType="Market",
-            qty=str(qty),
-            timeInForce="GTC"
-        )
-        return True
-    except Exception as e:
-        logging.error(f"❌ Erreur ordre : {e}")
-        return False
-
-def close_position(side, qty):
-    opp = "Buy" if side == "sell" else "Sell"
-    return create_order(opp, qty)
-
-def send_telegram(message):
+def tg(msg: str):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=5)
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }, timeout=10)
     except Exception as e:
-        logging.error(f"❌ Erreur envoi Telegram: {e}")
+        logging.error(f"Telegram error: {e}")
 
 def log_trade(action, side, price, score, pnl=0, reason=""):
     try:
-        with open(JOURNAL_FILE, "a") as f:
+        with open(JOURNAL_FILE, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} | {action} | {side} | {price:.6f} | score:{score:.2f} | P&L:{pnl:.2f} | {reason}\n")
     except:
         pass
 
 def send_stats():
-    """Envoie les statistiques du jour sur Telegram"""
     try:
-        with open(JOURNAL_FILE, "r") as f:
+        if not os.path.exists(JOURNAL_FILE):
+            tg("📊 Aucun trade enregistré pour le moment.")
+            return
+        with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
         today = datetime.now().strftime("%Y-%m-%d")
         today_trades = [l for l in lines if today in l and "CLOSE" in l]
         total = len(today_trades)
         if total == 0:
-            send_telegram(f"📊 Aucun trade clôturé aujourd'hui ({today})")
+            tg(f"📊 Aucun trade clôturé aujourd'hui ({today})")
             return
         winning = [l for l in today_trades if "P&L:" in l and float(l.split("P&L:")[1].split()[0]) > 0]
-        win_rate = len(winning) / total * 100 if total > 0 else 0
-        total_pnl = sum([float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l])
-        msg = (f"🔥 EMBER – RÉSUMÉ DU {today}\n"
-               f"   Trades: {total} | Gagnants: {len(winning)} | Perdants: {total - len(winning)}\n"
-               f"   Win rate: {win_rate:.1f}% | P&L total: {total_pnl:.2f} USDT")
-        send_telegram(msg)
+        win_rate = len(winning) / total * 100
+        total_pnl = sum(float(l.split("P&L:")[1].split()[0]) for l in today_trades if "P&L:" in l)
+        msg = (
+            f"🔥 <b>NEXUS – RÉSUMÉ DU {today}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Trades : {total}\n"
+            f"Gagnants : {len(winning)} | Perdants : {total - len(winning)}\n"
+            f"Winrate : {win_rate:.1f}%\n"
+            f"P&L total : <b>{total_pnl:+.2f} USDT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        tg(msg)
     except Exception as e:
-        send_telegram(f"❌ Erreur lors de la lecture du journal: {e}")
+        tg(f"❌ Erreur stats : {e}")
 
 def check_telegram_commands():
-    """Vérifie les commandes Telegram (/stats)"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
         resp = requests.get(url, timeout=5).json()
@@ -160,413 +117,443 @@ def check_telegram_commands():
             for update in resp["result"]:
                 if "message" in update and "text" in update["message"]:
                     text = update["message"]["text"]
-                    chat_id = update["message"]["chat"]["id"]
-                    if text == "/stats" and str(chat_id) == str(TELEGRAM_CHAT_ID):
+                    chat_id = str(update["message"]["chat"]["id"])
+                    if text == "/stats" and chat_id == str(TELEGRAM_CHAT_ID):
                         send_stats()
-                        # Marquer l'update comme lu
                         update_id = update["update_id"]
                         requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
     except Exception as e:
-        logging.error(f"❌ Erreur check_telegram_commands: {e}")
+        logging.error(f"Telegram commands error: {e}")
 
-# === INDICATEURS ===
-def get_rsi(ohlcv, index, period=14):
-    if index < period + 1:
-        return 50
-    closes = [float(c[3]) for c in ohlcv[:index+1]]
-    gains, losses = 0, 0
-    for i in range(1, period + 1):
-        diff = closes[-i] - closes[-i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses += abs(diff)
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+def msg_entry(side, entry, sl, tp, score, qty, details, proba, daily):
+    emoji = "🟢" if side == "Buy" else "🔴"
+    return (
+        f"{emoji} <b>NEXUS — {side.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{SYMBOL}</b>\n"
+        f"💰 Entrée : <code>{entry:.5f}</code>\n"
+        f"🛑 SL : <code>{sl:.5f}</code>\n"
+        f"🎯 TP : <code>{tp:.5f}</code>\n"
+        f"📊 Score : <b>{score:.1f}</b>\n"
+        f"🎲 Chances TP : <b>{proba:.0f}%</b>\n"
+        f"📦 Quantité : {qty}\n"
+        f"📈 {', '.join(details)}\n"
+        f"🌐 Daily : {daily.upper()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
 
-def get_ema(ohlcv, index, period):
-    if index < period:
-        return None
-    closes = [float(c[3]) for c in ohlcv[:index+1]]
+def msg_exit(side, reason, pnl, capital_now):
+    emoji = "✅" if pnl >= 0 else "❌"
+    return (
+        f"{emoji} <b>NEXUS — FERMETURE</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 {SYMBOL} | {side.upper()}\n"
+        f"📄 Raison : <b>{reason}</b>\n"
+        f"💵 P&L : <b>{pnl:+.2f} USDT</b>\n"
+        f"💼 Capital : {capital_now:.2f} USDT\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+# ============================================================
+#  INDICATEURS COMPLETS
+# ============================================================
+
+def get_klines(interval, limit=200):
+    try:
+        res = session.get_kline(category="linear", symbol=SYMBOL, interval=interval, limit=limit)
+        return list(reversed(res["result"]["list"]))
+    except Exception as e:
+        logging.error(f"Klines error: {e}")
+        return []
+
+def ema(values, period):
+    if len(values) < period:
+        return [None] * len(values)
+    result = [None] * len(values)
+    result[period-1] = sum(values[:period]) / period
     alpha = 2 / (period + 1)
-    result = [closes[0]]
-    for v in closes[1:]:
-        result.append(alpha * v + (1 - alpha) * result[-1])
-    return result[-1]
+    for i in range(period, len(values)):
+        result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+    return result
 
-def get_macd(ohlcv, index):
-    if index < 26:
-        return None, None
-    ema12 = get_ema(ohlcv, index, 12)
-    ema26 = get_ema(ohlcv, index, 26)
-    if ema12 is None or ema26 is None:
-        return None, None
-    macd = ema12 - ema26
-    signal = ema12 * 0.15 + ema26 * 0.85
-    return macd, signal
+def rsi(closes, period=14):
+    r = [50.0] * len(closes)
+    if len(closes) < period + 1:
+        return r
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    r[period] = 100 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
+    for i in range(period + 1, len(closes)):
+        avg_gain = (avg_gain * (period - 1) + gains[i-1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i-1]) / period
+        r[i] = 100 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
+    return r
 
-def get_stoch_rsi(ohlcv, index, period=14):
-    if index < period + 1:
-        return 50, 50
-    rsi_values = []
-    for i in range(index - period, index + 1):
-        rsi_values.append(get_rsi(ohlcv, i, period))
-    if not rsi_values:
-        return 50, 50
-    min_rsi = min(rsi_values)
-    max_rsi = max(rsi_values)
-    if max_rsi == min_rsi:
-        return 50, 50
-    stoch = (rsi_values[-1] - min_rsi) / (max_rsi - min_rsi)
-    return stoch * 100, stoch * 100
+def macd(closes, fast=12, slow=26, signal=9):
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    macd_line = [None] * len(closes)
+    for i in range(len(closes)):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            macd_line[i] = ema_fast[i] - ema_slow[i]
+    valid = [x for x in macd_line if x is not None]
+    sig = ema(valid, signal)
+    signal_line = [None] * len(closes)
+    offset = len(closes) - len(valid)
+    for i, v in enumerate(sig):
+        if offset + i < len(closes):
+            signal_line[offset + i] = v
+    return macd_line, signal_line
 
-def detect_bos(ohlcv, index):
-    if index < 5:
+def stoch_rsi(closes, period=14, smooth=3):
+    r = rsi(closes, period)
+    k = [50.0] * len(closes)
+    for i in range(period, len(closes)):
+        window = r[i-period+1:i+1]
+        mini, maxi = min(window), max(window)
+        k[i] = 50 if maxi == mini else ((r[i] - mini) / (maxi - mini)) * 100
+    for i in range(len(closes)):
+        if i >= smooth - 1:
+            k[i] = sum(k[i-smooth+1:i+1]) / smooth
+    return k, k
+
+def atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+    trs = []
+    for i in range(1, len(closes)):
+        trs.append(max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])))
+    atr_list = [None] * len(closes)
+    atr_list[period] = sum(trs[:period]) / period
+    for i in range(period+1, len(closes)):
+        atr_list[i] = (atr_list[i-1] * (period-1) + trs[i-1]) / period
+    return atr_list
+
+def volume_ma(volumes, period=20):
+    vma = [None] * len(volumes)
+    for i in range(period-1, len(volumes)):
+        vma[i] = sum(volumes[i-period+1:i+1]) / period
+    return vma
+
+def detect_bos(highs, lows, idx, lookback=5):
+    if idx < lookback:
         return False, False
-    highs = [float(c[1]) for c in ohlcv[index-5:index]]
-    lows = [float(c[2]) for c in ohlcv[index-5:index]]
-    current_high = float(ohlcv[index][1])
-    current_low = float(ohlcv[index][2])
-    return current_high > max(highs), current_low < min(lows)
+    return highs[idx] > max(highs[idx-lookback:idx]), lows[idx] < min(lows[idx-lookback:idx])
 
-def detect_choch(ohlcv, index):
-    if index < 6:
+def detect_fvg(highs, lows, idx):
+    if idx < 3:
         return False, False
-    highs = [float(c[1]) for c in ohlcv[index-6:index]]
-    lows = [float(c[2]) for c in ohlcv[index-6:index]]
-    closes = [float(c[3]) for c in ohlcv[:index+1]]
-    current_close = closes[-1]
-    return current_close > max(highs), current_close < min(lows)
+    return lows[idx] > highs[idx-3], highs[idx] < lows[idx-3]
 
-def detect_fvg(ohlcv, index):
-    if index < 3:
-        return False, False
-    high_2 = float(ohlcv[index-3][1])
-    low_2 = float(ohlcv[index-3][2])
-    high_0 = float(ohlcv[index][1])
-    low_0 = float(ohlcv[index][2])
-    return low_0 > high_2, high_0 < low_2
+def detect_pullback(closes, idx, direction, threshold=0.30):
+    if idx < 10:
+        return False
+    if direction == "bull":
+        recent_high = max(closes[idx-10:idx-3])
+        min_low = min(closes[idx-5:idx])
+        if recent_high > 0:
+            retrace = (recent_high - min_low) / recent_high
+            return retrace <= threshold and closes[idx] > min_low
+    else:
+        recent_low = min(closes[idx-10:idx-3])
+        max_high = max(closes[idx-5:idx])
+        if recent_low > 0:
+            retrace = (max_high - recent_low) / recent_low
+            return retrace <= threshold and closes[idx] < max_high
+    return False
 
-def get_volume_ma(ohlcv, index, period=20):
-    if index < period:
-        return None
-    volumes = [float(c[4]) for c in ohlcv[index-period:index]]
-    return sum(volumes) / len(volumes)
-
-def get_atr(ohlcv, index, period=14):
-    if index < period:
-        return None
-    true_ranges = []
-    for i in range(index - period + 1, index + 1):
-        high = float(ohlcv[i][1])
-        low = float(ohlcv[i][2])
-        prev_close = float(ohlcv[i-1][3]) if i > 0 else low
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        true_ranges.append(tr)
-    return sum(true_ranges) / len(true_ranges)
-
-def time_filter(timestamp):
-    dt = datetime.fromtimestamp(int(timestamp)/1000)
-    hour = dt.hour + 1
-    if hour >= 24:
-        hour -= 24
-    return 8 <= hour <= 22
+def get_daily_trend():
+    kl = get_klines("D", 60)
+    if len(kl) < 30:
+        return "neutral"
+    closes = [float(x[4]) for x in kl]
+    e20 = ema(closes, 20)[-1]
+    e50 = ema(closes, 50)[-1]
+    if e20 is None or e50 is None:
+        return "neutral"
+    if e20 > e50 * 1.008:
+        return "bull"
+    if e20 < e50 * 0.992:
+        return "bear"
+    return "neutral"
 
 # ============================================================
-#  BOUCLE PRINCIPALE – EMBER (LIVE)
+#  SIGNAL COMPLET
 # ============================================================
 
-def bot():
-    logging.info("🔥 Bot 'EMBER' – LIVE (démo) – Version finale (trailing % fixe)")
-    send_telegram("🔥 Bot 'EMBER' – LIVE (démo) – Version finale")
+def get_signal():
+    kl = get_klines(TIMEFRAME, 180)
+    if len(kl) < 120:
+        return None
 
-    position = None
-    entry_price = 0
-    entry_score = 0.0
-    trailing_sl_price = 0
-    qty_position = 0
-    capital_peak = 0.0
-    pyramide_active = False
+    closes = [float(x[4]) for x in kl]
+    highs  = [float(x[2]) for x in kl]
+    lows   = [float(x[3]) for x in kl]
+    volumes = [float(x[5]) for x in kl]
 
-    side, qty, avg = get_position()
-    if side is not None:
-        position = side
-        entry_price = avg
-        qty_position = qty
-        capital_peak = get_balance()
-        logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
-        send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
+    ema20 = ema(closes, 20)
+    ema50 = ema(closes, 50)
+    ema200 = ema(closes, 200)
+    rsi_list = rsi(closes)
+    macd_line, macd_sig = macd(closes)
+    stoch_k, stoch_d = stoch_rsi(closes)
+    atr_list = atr(highs, lows, closes)
+    vol_ma = volume_ma(volumes)
+
+    i = -1
+    if any(x is None for x in [ema20[i], ema50[i], ema200[i], atr_list[i]]):
+        return None
+
+    price = closes[i]
+    current_atr = atr_list[i]
+    current_rsi = rsi_list[i]
+    current_vol = volumes[i]
+
+    buy_score = sell_score = 0.0
+    buy_details, sell_details = [], []
+
+    # RSI ≤30 / ≥80 + bonus extrême
+    if current_rsi <= 30:
+        pts = 1.5 + max(0, (30 - current_rsi) / 30)
+        buy_score += pts
+        buy_details.append("RSI")
+    elif current_rsi >= 80:
+        pts = 1.5 + max(0, (current_rsi - 80) / 20)
+        sell_score += pts
+        sell_details.append("RSI")
+
+    # EMA
+    if price > ema20[i] > ema50[i]:
+        buy_score += 2.1
+        buy_details.append("EMA")
+    elif price < ema20[i] < ema50[i]:
+        sell_score += 2.1
+        sell_details.append("EMA")
+
+    # MACD
+    if macd_line[i] is not None and macd_sig[i] is not None:
+        if macd_line[i] > macd_sig[i] and macd_line[i] > 0:
+            buy_score += 1.8
+            buy_details.append("MACD")
+        elif macd_line[i] < macd_sig[i] and macd_line[i] < 0:
+            sell_score += 1.8
+            sell_details.append("MACD")
+
+    # StochRSI ≤10 / ≥90
+    if stoch_k[i] <= 10 and stoch_d[i] <= 10:
+        buy_score += 1.4
+        buy_details.append("Stoch")
+    elif stoch_k[i] >= 90 and stoch_d[i] >= 90:
+        sell_score += 1.4
+        sell_details.append("Stoch")
+
+    # Volume
+    if vol_ma[i] and current_vol > vol_ma[i] * 1.5:
+        if buy_score > 0:
+            buy_score += 0.8
+            buy_details.append("Vol")
+        if sell_score > 0:
+            sell_score += 0.8
+            sell_details.append("Vol")
+
+    # BOS
+    bos_h, bos_b = detect_bos(highs, lows, len(closes)-1)
+    if bos_h:
+        buy_score += 0.9
+        buy_details.append("BOS")
+    if bos_b:
+        sell_score += 0.9
+        sell_details.append("BOS")
+
+    # FVG + Pullback (bonus)
+    fvg_h, fvg_b = detect_fvg(highs, lows, len(closes)-1)
+    if fvg_h:
+        buy_score += 0.7
+        buy_details.append("FVG")
+    if fvg_b:
+        sell_score += 0.7
+        sell_details.append("FVG")
+
+    if detect_pullback(closes, len(closes)-1, "bull"):
+        buy_score += 0.8
+        buy_details.append("Pullback")
+    if detect_pullback(closes, len(closes)-1, "bear"):
+        sell_score += 0.8
+        sell_details.append("Pullback")
+
+    # Filtre Daily
+    daily = get_daily_trend()
+    required = SCORE_MIN
+    if daily == "bull" and sell_score > 0:
+        required = SCORE_MIN_CONTRE
+    elif daily == "bear" and buy_score > 0:
+        required = SCORE_MIN_CONTRE
+
+    side = None
+    score = 0
+    details = []
+    if buy_score >= required:
+        side = "Buy"
+        score = buy_score
+        details = buy_details
+    elif sell_score >= required:
+        side = "Sell"
+        score = sell_score
+        details = sell_details
+
+    if side is None:
+        return None
+
+    stop_dist = current_atr * SL_ATR_MULT
+    if side == "Buy":
+        sl = price - stop_dist
+        tp = price + stop_dist * RR_RATIO
+    else:
+        sl = price + stop_dist
+        tp = price - stop_dist * RR_RATIO
+
+    # Chances d'atteindre le TP
+    dist_tp = abs(tp - price)
+    proba = max(25, min(78, 58 - (dist_tp / current_atr - 2.4) * 7))
+
+    return {
+        "side": side,
+        "entry": price,
+        "sl": sl,
+        "tp": tp,
+        "score": score,
+        "details": details,
+        "daily": daily,
+        "proba": proba
+    }
+
+# ============================================================
+#  TRADING
+# ============================================================
+
+def get_balance():
+    try:
+        res = session.get_wallet_balance(accountType="UNIFIED")
+        for c in res["result"]["list"][0]["coin"]:
+            if c["coin"] == "USDT":
+                return float(c["walletBalance"])
+    except Exception as e:
+        logging.error(f"Balance error: {e}")
+    return 0.0
+
+def place_order(signal):
+    global capital, open_position, last_trade_time, capital_peak
+
+    risk_amount = capital * RISK_PER_TRADE
+    stop_dist = abs(signal["entry"] - signal["sl"])
+    qty = risk_amount / stop_dist
+    qty = math.floor(qty) if qty >= 1 else 0
+
+    if qty <= 0:
+        return False
+
+    try:
+        session.set_leverage(
+            category="linear",
+            symbol=SYMBOL,
+            buyLeverage=str(LEVERAGE),
+            sellLeverage=str(LEVERAGE)
+        )
+
+        session.place_order(
+            category="linear",
+            symbol=SYMBOL,
+            side=signal["side"],
+            orderType="Market",
+            qty=str(qty),
+            stopLoss=str(round(signal["sl"], 5)),
+            takeProfit=str(round(signal["tp"], 5)),
+            timeInForce="GTC"
+        )
+
+        open_position = {
+            "side": signal["side"],
+            "entry": signal["entry"],
+            "qty": qty,
+            "sl": signal["sl"],
+            "tp": signal["tp"],
+            "score": signal["score"]
+        }
+        last_trade_time = time.time()
+        capital_peak = max(capital_peak, capital)
+
+        tg(msg_entry(
+            signal["side"], signal["entry"], signal["sl"], signal["tp"],
+            signal["score"], qty, signal["details"], signal["proba"], signal["daily"]
+        ))
+        log_trade("OPEN", signal["side"], signal["entry"], signal["score"], 0, "NEW")
+        logging.info(f"ENTRY {signal['side']} @ {signal['entry']:.5f} | Score {signal['score']:.1f}")
+        return True
+
+    except Exception as e:
+        logging.error(f"Order error: {e}")
+        tg(f"⚠️ Erreur ordre :\n<code>{e}</code>")
+        return False
+
+def check_position():
+    global open_position, capital
+    try:
+        res = session.get_positions(category="linear", symbol=SYMBOL)
+        has_position = any(float(p["size"]) > 0 for p in res["result"]["list"])
+
+        if open_position and not has_position:
+            capital = get_balance()
+            # PnL approximatif (on pourra l'améliorer plus tard)
+            tg(msg_exit(open_position["side"], "SL/TP", 0, capital))
+            log_trade("CLOSE", open_position["side"], 0, open_position["score"], 0, "SL/TP")
+            open_position = None
+            logging.info("Position fermée")
+    except Exception as e:
+        logging.error(f"Check position error: {e}")
+
+# ============================================================
+#  MAIN
+# ============================================================
+
+def main():
+    global capital, daily_start_capital, capital_peak
+
+    tg(f"🚀 <b>NEXUS démarré</b>\nMode : <b>DÉMO BYBIT</b>\nSymbole : {SYMBOL}\nTimeframe : 30m\nScore min : {SCORE_MIN}")
+
+    capital = get_balance()
+    daily_start_capital = capital
+    capital_peak = capital
+    logging.info(f"Capital: {capital:.2f} USDT")
 
     while True:
         try:
-            # Vérification des commandes Telegram
             check_telegram_commands()
 
             capital = get_balance()
-            if capital <= 0:
-                logging.warning("⚠️ Solde à zéro, on attend...")
-                time.sleep(30)
+            daily_pnl = capital - daily_start_capital
+
+            if daily_pnl <= -(daily_start_capital * MAX_DAILY_LOSS_PCT):
+                tg(f"🛑 <b>MAX DAILY LOSS atteint</b>\nP&L jour : {daily_pnl:.2f} USDT\nBot en pause.")
+                time.sleep(1800)
                 continue
 
-            if capital_peak == 0:
-                capital_peak = capital
+            check_position()
 
-            drawdown_protection = False
-            if USE_DRAWDOWN_PROTECTION and capital < capital_peak * 0.9:
-                drawdown_protection = True
-                logging.info(f"🛡️ Drawdown > 10% – réduction de taille active")
-                send_telegram(f"🛡️ Drawdown > 10% – réduction de taille active")
+            if open_position is None and time.time() - last_trade_time > 18 * 60:
+                signal = get_signal()
+                if signal:
+                    place_order(signal)
 
-            ohlcv = get_ohlcv(100)
-            if not ohlcv or len(ohlcv) < 30:
-                time.sleep(30)
-                continue
-
-            price = get_current_price()
-            current_time = int(ohlcv[-1][0])
-
-            if USE_TIME_FILTER and not time_filter(current_time):
-                time.sleep(30)
-                continue
-
-            side, qty, avg = get_position()
-            if side is not None:
-                if position is None:
-                    position = side
-                    entry_price = avg
-                    qty_position = qty
-                    logging.info(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
-                    send_telegram(f"🔄 Position reprise: {side.upper()} {qty} BSB à {avg:.6f}")
-            else:
-                if position is not None:
-                    logging.info("🔒 Position fermée")
-                    position = None
-                    entry_price = 0
-                    entry_score = 0.0
-                    trailing_sl_price = 0
-                    qty_position = 0
-                    pyramide_active = False
-
-            i = len(ohlcv) - 1
-
-            rsi = get_rsi(ohlcv, i)
-            ema50 = get_ema(ohlcv, i, 50)
-            ema200 = get_ema(ohlcv, i, 200)
-            macd, signal = get_macd(ohlcv, i)
-            stoch_k, stoch_d = get_stoch_rsi(ohlcv, i)
-            vol_ma = get_volume_ma(ohlcv, i, 20)
-            bos_h, bos_b = detect_bos(ohlcv, i)
-            choch_h, choch_b = detect_choch(ohlcv, i)
-            fvg_h, fvg_b = detect_fvg(ohlcv, i)
-            atr = get_atr(ohlcv, i)
-
-            # --- GESTION POSITION ---
-            if position is not None and entry_price > 0:
-                pnl = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
-                pnl *= LEVERAGE
-
-                sl_price = entry_price * (1 - STOP_LOSS) if position == 'buy' else entry_price * (1 + STOP_LOSS)
-                tp_price = entry_price * (1 + TAKE_PROFIT) if position == 'buy' else entry_price * (1 - TAKE_PROFIT)
-
-                # Trailing % fixe
-                if trailing_sl_price == 0 and pnl >= TRAILING_ACTIVATE_PNL:
-                    if position == 'buy':
-                        trailing_sl_price = entry_price * (1 + FRAIS_BUFFER)
-                    else:
-                        trailing_sl_price = entry_price * (1 - FRAIS_BUFFER)
-                    logging.info(f"🔒 Trailing % activé à {trailing_sl_price:.4f}")
-                    send_telegram(f"🔒 Trailing % activé à {trailing_sl_price:.4f}")
-
-                if trailing_sl_price != 0:
-                    if position == 'buy' and price > entry_price:
-                        new_sl = entry_price + (price - entry_price) * TRAILING_STEP
-                        if new_sl > trailing_sl_price:
-                            trailing_sl_price = new_sl
-                    elif position == 'sell' and price < entry_price:
-                        new_sl = entry_price - (entry_price - price) * TRAILING_STEP
-                        if new_sl < trailing_sl_price:
-                            trailing_sl_price = new_sl
-
-                reason = None
-                if position == 'buy':
-                    if price <= sl_price:
-                        reason = 'SL'
-                    elif price >= tp_price:
-                        reason = 'TP'
-                    elif trailing_sl_price != 0 and price <= trailing_sl_price:
-                        reason = 'TRAILING'
-                else:
-                    if price >= sl_price:
-                        reason = 'SL'
-                    elif price <= tp_price:
-                        reason = 'TP'
-                    elif trailing_sl_price != 0 and price >= trailing_sl_price:
-                        reason = 'TRAILING'
-
-                if reason:
-                    valeur_position = qty_position * entry_price / LEVERAGE
-                    pnl_usdt = pnl * valeur_position
-                    pnl_usdt_net = pnl_usdt - COMMISSION * valeur_position
-
-                    if pnl_usdt_net < -MAX_LOSS_USDT:
-                        pnl_usdt_net = -MAX_LOSS_USDT
-                        reason = f"{reason} (limité)"
-
-                    msg = f"🔻 {reason} à {price:.6f} | P&L: {pnl_usdt_net:.2f} USDT ({pnl*100:.2f}%)"
-                    logging.info(msg)
-                    send_telegram(msg)
-                    close_position(position, qty_position)
-                    log_trade("CLOSE", position, price, entry_score, pnl_usdt_net, reason)
-                    position = None
-                    entry_price = 0
-                    entry_score = 0.0
-                    trailing_sl_price = 0
-                    qty_position = 0
-                    pyramide_active = False
-                    continue
-
-            # --- FILTRE ATR ---
-            if atr is not None and atr < ATR_THRESHOLD:
-                time.sleep(30)
-                continue
-
-            # --- TENDANCE ---
-            if ema50 is not None and ema200 is not None:
-                trend_bull = ema50 > ema200
-                trend_bear = ema50 < ema200
-            else:
-                trend_bull = False
-                trend_bear = False
-
-            # --- SCORE ---
-            buy_score = 0.0
-            sell_score = 0.0
-            buy_details = []
-            sell_details = []
-
-            if rsi < RSI_OVERSOLD:
-                buy_score += 1.0
-                buy_details.append("RSI")
-            elif rsi > RSI_OVERBOUGHT:
-                sell_score += 1.0
-                sell_details.append("RSI")
-
-            if ema50 is not None:
-                if price > ema50:
-                    buy_score += 1.0
-                    buy_details.append("EMA")
-                else:
-                    sell_score += 1.0
-                    sell_details.append("EMA")
-
-            if macd is not None and signal is not None:
-                if macd > signal:
-                    buy_score += 1.0
-                    buy_details.append("MACD")
-                else:
-                    sell_score += 1.0
-                    sell_details.append("MACD")
-
-            if stoch_k < STOCH_OVERSOLD and stoch_d < STOCH_OVERSOLD:
-                buy_score += 1.0
-                buy_details.append("StochRSI")
-            elif stoch_k > STOCH_OVERBOUGHT and stoch_d > STOCH_OVERBOUGHT:
-                sell_score += 1.0
-                sell_details.append("StochRSI")
-
-            if vol_ma is not None and float(ohlcv[i][4]) > vol_ma * VOLUME_SPIKE:
-                if buy_score > 0:
-                    buy_score += 1.0
-                    buy_details.append("Vol")
-                elif sell_score > 0:
-                    sell_score += 1.0
-                    sell_details.append("Vol")
-
-            if bos_h or choch_h:
-                buy_score += 1.0
-                buy_details.append("BOS/CHoCH")
-            if bos_b or choch_b:
-                sell_score += 1.0
-                sell_details.append("BOS/CHoCH")
-
-            if fvg_h:
-                buy_score += 1.0
-                buy_details.append("FVG")
-            if fvg_b:
-                sell_score += 1.0
-                sell_details.append("FVG")
-
-            if trend_bull and sell_score > 0:
-                sell_score = 0
-                sell_details = []
-            if trend_bear and buy_score > 0:
-                buy_score = 0
-                buy_details = []
-
-            signal_side = None
-            if buy_score >= SCORE_SEUIL:
-                signal_side = 'buy'
-                signal_score = buy_score
-                signal_details = buy_details
-            elif sell_score >= SCORE_SEUIL:
-                signal_side = 'sell'
-                signal_score = sell_score
-                signal_details = sell_details
-
-            # ============================================================
-#  NOUVELLE ENTRÉE (POSITION IS NONE) + BOUCLE PRINCIPALE
-# ============================================================
-
-            # --- PYRAMIDE (si position déjà ouverte) ---
-            if USE_PYRAMID and position is not None and not pyramide_active:
-                pnl_actuel = (price - entry_price) / entry_price if position == 'buy' else (entry_price - price) / entry_price
-                if pnl_actuel * 100 >= 3:
-                    risque = RISQUE_PAR_TRADE * 0.5 if drawdown_protection else RISQUE_PAR_TRADE
-                    risque_usdt = capital * risque
-                    distance_sl = price * STOP_LOSS
-                    qty_add = risque_usdt / distance_sl
-                    qty_add = qty_add / LEVERAGE
-                    qty_add = max(1, int(qty_add * 1.1) // 2)
-                    if qty_add > 0:
-                        if create_order(position, qty_add):
-                            qty_position += qty_add
-                            pyramide_active = True
-                            logging.info(f"🔺 Pyramide ajoutée: +{qty_add} BSB à {price:.4f}")
-                            send_telegram(f"🔺 Pyramide ajoutée: +{qty_add} BSB à {price:.4f}")
-
-            # --- NOUVELLE ENTRÉE (position is None) ---
-            if position is None and signal_side is not None:
-                risque = RISQUE_PAR_TRADE * 0.5 if drawdown_protection else RISQUE_PAR_TRADE
-                risque_usdt = capital * risque
-                distance_sl = price * STOP_LOSS
-                qty = risque_usdt / distance_sl
-                qty = qty / LEVERAGE
-                qty = max(1, int(qty * 1.1))
-
-                if create_order(signal_side, qty):
-                    position = signal_side
-                    entry_price = price
-                    entry_score = signal_score
-                    qty_position = qty
-                    trailing_sl_price = 0
-                    pyramide_active = False
-                    log_trade("OPEN", signal_side, price, signal_score, 0, "NEW")
-                    msg = f"🔥 {signal_side.upper()} EMBER – ouvert à {price:.6f} | Score: {entry_score:.2f} | Qty: {qty} BSB | Capital: {capital:.2f} USDT | indicateurs: {', '.join(signal_details)}"
-                    logging.info(msg)
-                    send_telegram(msg)
-
-            time.sleep(30)
+            time.sleep(40)
 
         except Exception as e:
-            error_msg = f"❌ Erreur critique (EMBER): {e}"
-            logging.error(error_msg)
-            send_telegram(error_msg)
-            time.sleep(60)
+            logging.error(f"Loop error: {e}")
+            time.sleep(20)
 
 if __name__ == "__main__":
-    bot()
-        
+    main()
