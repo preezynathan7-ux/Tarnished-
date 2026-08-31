@@ -31,7 +31,7 @@ MAX_DAILY_LOSS_PCT = 0.06
 
 SL_ATR_MULT = 2.7
 RR_RATIO = 2.4
-SCORE_MIN = 3.0
+SCORE_MIN = 2.0
 SCORE_MIN_CONTRE = 5.3
 
 # Trailing stop natif Bybit (géré par la plateforme, pas par le bot en boucle)
