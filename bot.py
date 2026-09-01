@@ -31,7 +31,7 @@ MAX_DAILY_LOSS_PCT = 0.06
 
 SL_ATR_MULT = 2.7
 RR_RATIO = 2.4
-SCORE_MIN = 2.0
+SCORE_MIN = 3.8
 SCORE_MIN_CONTRE = 5.3
 
 # Trailing stop natif Bybit (géré par la plateforme, pas par le bot en boucle)
@@ -336,7 +336,7 @@ def get_daily_trend():
     return "neutral"
 
 def get_signal():
-    kl = get_klines(TIMEFRAME, 180)
+    kl = get_klines(TIMEFRAME, 220)
     if len(kl) < 120:
         return None
 
