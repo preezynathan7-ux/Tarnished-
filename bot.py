@@ -22,8 +22,8 @@ import requests
 # ============================================================
 
 API_KEY = os.environ.get("BYBIT_API_KEY", "yhIWArGAp0JwDLDja2")
-API_SECRET = os.environ.get("BYBIT_API_SECRET", "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ")
+API_SECRET = os.environ.get("BYBIT_API_SECRET", "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE"")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ"")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7645348359")
 
 SYMBOL = "BSBUSDT"
@@ -182,6 +182,25 @@ def send_stats():
         tg(msg)
     except Exception as e:
         tg(f"❌ Erreur stats : {e}")
+
+def flush_pending_updates():
+    """Vide d'un coup tout le backlog d'updates Telegram accumulé (ex: bug d'offset
+    des anciennes versions). Sans ça, le bot met du temps à 'rattraper' l'historique
+    avant de voir tes commandes récentes comme /stats."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset=-1"
+        resp = requests.get(url, timeout=10).json()
+        if resp.get("ok") and resp.get("result"):
+            last_id = resp["result"][-1]["update_id"]
+            requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_id + 1}",
+                timeout=10
+            )
+            logging.info(f"Backlog Telegram vidé (jusqu'à update_id {last_id})")
+        else:
+            logging.info("Aucun backlog Telegram à vider")
+    except Exception as e:
+        logging.error(f"flush_pending_updates error: {e}")
 
 def check_telegram_commands():
     """Fix définitif : on parcourt TOUS les updates, on traite chaque commande,
@@ -641,6 +660,8 @@ def send_close_notification():
 
 def main():
     global daily_start_capital, last_reset_date, last_trade_time, last_heartbeat, tracked_position
+
+    flush_pending_updates()
 
     tg(f"🚀 <b>NEXUS v3 démarré</b>\nMode : DÉMO BYBIT\nSymbole : {SYMBOL}\nTF : {TIMEFRAME}m")
 
