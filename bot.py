@@ -640,3 +640,88 @@ def send_close_notification():
 # ============================================================
 
 def main():
+    global daily_start_capital, last_reset_date, last_trade_time, last_heartbeat, tracked_position
+
+    tg(f"🚀 <b>NEXUS v3 démarré</b>\nMode : DÉMO BYBIT\nSymbole : {SYMBOL}\nTF : {TIMEFRAME}m")
+
+    real_pos = get_real_position()
+    if real_pos:
+        tg(f"🔄 <b>Position reprise au démarrage</b>\n{real_pos['side']} {real_pos['size']} @ "
+           f"{real_pos['entry']:.5f}\nPnL non réalisé : {real_pos['unrealised_pnl']:+.2f} USDT")
+        tracked_position = {"side": real_pos["side"], "entry": real_pos["entry"],
+                             "trailing_active": False, "trailing_distance": None}
+    else:
+        logging.info("Aucune position ouverte au démarrage")
+
+    capital = get_balance()
+    daily_start_capital = capital
+    last_reset_date = date.today()
+    last_heartbeat = time.time()
+
+    previous_had_position = real_pos is not None
+
+    while True:
+        try:
+            check_telegram_commands()
+
+            if date.today() != last_reset_date:
+                daily_start_capital = get_balance()
+                last_reset_date = date.today()
+                tg(f"🔁 Nouveau jour — capital de référence reset à {daily_start_capital:.2f} USDT")
+
+            capital = get_balance()
+            daily_pnl = capital - daily_start_capital
+
+            if daily_pnl <= -(daily_start_capital * MAX_DAILY_LOSS_PCT):
+                tg(f"🛑 <b>MAX DAILY LOSS atteint</b>\nP&L jour : {daily_pnl:.2f} USDT\nBot en pause 30 min.")
+                time.sleep(1800)
+                continue
+
+            real_pos = get_real_position()
+            has_position = real_pos is not None
+
+            if previous_had_position and not has_position:
+                send_close_notification()
+                tracked_position = None
+
+            if has_position:
+                manage_trailing(real_pos)
+
+            # Heartbeat avec score des deux côtés si pas de position
+            if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+                if has_position:
+                    status = (f"📍 Position en cours: {real_pos['side']} @ {real_pos['entry']:.5f} "
+                              f"(PnL: {real_pos['unrealised_pnl']:+.2f} USDT)")
+                    tg(f"💓 <b>NEXUS actif</b>\nCapital: {capital:.2f} USDT\n{status}")
+                else:
+                    data = compute_scores()
+                    if data:
+                        long_line = format_side_summary(data["buy_score"], data["buy_details"], "Long")
+                        short_line = format_side_summary(data["sell_score"], data["sell_details"], "Short")
+                        tg(f"💓 <b>NEXUS actif</b>\nCapital: {capital:.2f} USDT\n"
+                           f"📭 Aucune position ouverte, en attente d'un signal.\n"
+                           f"📊 {long_line}\n📊 {short_line}\n🌐 Biais journalier: {data['daily'].upper()}")
+                    else:
+                        tg(f"💓 <b>NEXUS actif</b>\nCapital: {capital:.2f} USDT\n📭 En attente de données suffisantes.")
+                last_heartbeat = time.time()
+
+            previous_had_position = has_position
+
+            if not has_position and time.time() - last_trade_time > COOLDOWN_AFTER_TRADE_SEC:
+                signal, data = get_signal()
+                if signal and data:
+                    if signal["side"] == "Buy":
+                        opposite_summary = format_side_summary(data["sell_score"], data["sell_details"], "Short")
+                    else:
+                        opposite_summary = format_side_summary(data["buy_score"], data["buy_details"], "Long")
+                    place_order(signal, opposite_summary)
+
+            time.sleep(LOOP_SLEEP_SEC)
+
+        except Exception as e:
+            logging.error(f"Loop error: {e}")
+            tg(f"⚠️ Erreur boucle principale:\n<code>{e}</code>")
+            time.sleep(20)
+
+if __name__ == "__main__":
+    main()
