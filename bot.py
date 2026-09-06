@@ -1,8 +1,12 @@
 # ============================================================
-# NEXUS Trading Bot v2 - Corrections critiques
-# Bybit Demo | 30m | BSBUSDT
-# Corrections: PnL réel via API, trailing natif Bybit,
-# reset quotidien, notifications fiables, heartbeat
+# NEXUS Trading Bot v3
+# Bybit Demo | BSBUSDT
+# Changements vs v2 :
+#  - FVG retiré du scoring
+#  - LT BOS / ST BOS ajoutés (influence la distance du TP)
+#  - Score du signal OPPOSE affiché à l'ouverture et au heartbeat
+#  - Fix définitif du bug /stats (offset géré une seule fois)
+#  - Toute la config réglable regroupée en haut du fichier
 # ============================================================
 
 import time
@@ -14,12 +18,11 @@ from pybit.unified_trading import HTTP
 import requests
 
 # ============================================================
-#  CONFIGURATION
+#  ZONE DE CONFIGURATION — MODIFIE TOUT ICI
 # ============================================================
 
 API_KEY = os.environ.get("BYBIT_API_KEY", "yhIWArGAp0JwDLDja2")
 API_SECRET = os.environ.get("BYBIT_API_SECRET", "Xlg8fjG557YapL9B6EwHBCtotWkiadnENRtE")
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8878379567:AAECojwAmR2P10PXOJgQdJJtAbwXBPkwoaQ")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7645348359")
 
@@ -29,31 +32,84 @@ LEVERAGE = 10
 RISK_PER_TRADE = 0.02
 MAX_DAILY_LOSS_PCT = 0.06
 
+# --- Score de décision ---
+SCORE_MIN = 3.8            # seuil pour trader dans le sens du biais journalier
+SCORE_MIN_CONTRE = 5.3     # seuil plus strict pour trader à contre-biais
+
+# --- RSI ---
+RSI_PERIOD = 14
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 80
+RSI_POINTS = 1.5           # points de base attribués si condition remplie
+
+# --- MACD ---
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+MACD_POINTS = 1.8
+
+# --- EMA (structure de tendance) ---
+EMA_FAST = 20
+EMA_MID = 50
+EMA_SLOW = 200
+EMA_POINTS = 2.1
+
+# --- Stochastic RSI ---
+STOCH_PERIOD = 14
+STOCH_SMOOTH = 3
+STOCH_OVERSOLD = 10
+STOCH_OVERBOUGHT = 90
+STOCH_POINTS = 1.4
+
+# --- Volume ---
+VOLUME_MA_PERIOD = 20
+VOLUME_SPIKE_MULT = 1.5
+VOLUME_POINTS = 0.8
+
+# --- BOS Court Terme / Long Terme ---
+ST_BOS_LOOKBACK = 5        # ~2h30 en 30m — cassure de structure récente
+LT_BOS_LOOKBACK = 25       # ~12h30 en 30m — cassure de structure plus large
+ST_BOS_POINTS = 0.6
+LT_BOS_POINTS = 1.2
+
+# --- Pullback ---
+PULLBACK_LOOKBACK = 10
+PULLBACK_THRESHOLD = 0.30
+PULLBACK_POINTS = 0.8
+
+# --- Stop Loss / Take Profit ---
 SL_ATR_MULT = 2.7
-RR_RATIO = 2.4
-SCORE_MIN = 3.8
-SCORE_MIN_CONTRE = 5.3
+RR_RATIO_DEFAULT = 2.0     # si ni ST ni LT BOS n'accompagne le signal
+RR_RATIO_ST = 1.6          # ST BOS seul -> mouvement probablement court -> TP plus proche
+RR_RATIO_LT = 3.0          # LT BOS présent -> mouvement structurel -> TP plus loin
 
-# Trailing stop natif Bybit (géré par la plateforme, pas par le bot en boucle)
-TRAILING_ACTIVATE_PCT = 0.015   # active le trailing après ce % de profit
-TRAILING_ATR_MULT = 1.8         # distance du trailing = X fois l'ATR
+# --- Trailing stop natif Bybit ---
+TRAILING_ACTIVATE_PCT = 0.015
+TRAILING_ATR_MULT = 1.8
 
-HEARTBEAT_INTERVAL_SEC = 4 * 3600   # message de vie toutes les 4h
+# --- Filtre volatilité (ATR) ---
+ATR_MIN = 0.0006
+ATR_MAX = 0.0015
+
+# --- Rythme du bot ---
+HEARTBEAT_INTERVAL_SEC = 4 * 3600
 COOLDOWN_AFTER_TRADE_SEC = 18 * 60
 LOOP_SLEEP_SEC = 40
 
 JOURNAL_FILE = "journal_nexus.txt"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+# ============================================================
+#  INIT
+# ============================================================
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
-# État global
 daily_start_capital = 0.0
 last_reset_date = date.today()
 last_trade_time = 0
 last_heartbeat = 0
-tracked_position = None   # dict: side, entry, size, trailing_active
+tracked_position = None
 
 # ============================================================
 #  TELEGRAM
@@ -85,7 +141,7 @@ def send_stats():
         if real_pos:
             status_line = (f"\n📍 <b>Position ouverte</b>: {real_pos['side']} "
                             f"{real_pos['size']} @ {real_pos['entry']:.5f} "
-                            f"(PnL non réalisé: {real_pos['unrealised_pnl']:+.2f} USDT)\n")
+                            f"(PnL: {real_pos['unrealised_pnl']:+.2f} USDT)\n")
 
         if not os.path.exists(JOURNAL_FILE):
             tg(f"📊 Aucun trade clôturé enregistré.{status_line}")
@@ -105,7 +161,7 @@ def send_stats():
         for l in today_closed:
             try:
                 pnls.append(float(l.split("P&L:")[1].split()[0]))
-            except:
+            except Exception:
                 pass
 
         total = len(pnls)
@@ -128,23 +184,33 @@ def send_stats():
         tg(f"❌ Erreur stats : {e}")
 
 def check_telegram_commands():
+    """Fix définitif : on parcourt TOUS les updates, on traite chaque commande,
+    et on n'envoie l'offset qu'UNE SEULE FOIS à la fin avec le plus grand update_id."""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
         resp = requests.get(url, timeout=5).json()
-        if resp.get("ok") and resp.get("result"):
-            for update in resp["result"]:
-                if "message" in update and "text" in update["message"]:
-                    text = update["message"]["text"]
-                    chat_id = str(update["message"]["chat"]["id"])
-                    if text == "/stats" and chat_id == str(TELEGRAM_CHAT_ID):
-                        send_stats()
-                    update_id = update["update_id"]
-                    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={update_id+1}", timeout=5)
+        if not (resp.get("ok") and resp.get("result")):
+            return
+
+        max_update_id = None
+        for update in resp["result"]:
+            max_update_id = update["update_id"]
+            if "message" in update and "text" in update["message"]:
+                text = update["message"]["text"].strip()
+                chat_id = str(update["message"]["chat"]["id"])
+                if chat_id == str(TELEGRAM_CHAT_ID) and text == "/stats":
+                    send_stats()
+
+        if max_update_id is not None:
+            requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={max_update_id + 1}",
+                timeout=5
+            )
     except Exception as e:
         logging.error(f"Telegram commands error: {e}")
 
 # ============================================================
-#  FONCTIONS BYBIT
+#  BYBIT
 # ============================================================
 
 def get_balance():
@@ -164,8 +230,7 @@ def get_real_position():
             size = float(p["size"])
             if size > 0:
                 return {
-                    "side": p["side"],
-                    "size": size,
+                    "side": p["side"], "size": size,
                     "entry": float(p["avgPrice"]),
                     "unrealised_pnl": float(p.get("unrealisedPnl", 0)),
                 }
@@ -175,7 +240,6 @@ def get_real_position():
         return None
 
 def get_last_closed_pnl():
-    """Récupère le PnL réel du dernier trade clôturé sur Bybit (pas d'estimation locale)."""
     try:
         res = session.get_closed_pnl(category="linear", symbol=SYMBOL, limit=1)
         items = res["result"]["list"]
@@ -193,13 +257,10 @@ def get_last_closed_pnl():
     return None
 
 def set_native_trailing_stop(distance):
-    """Active le trailing stop natif Bybit (géré côté serveur, plus fiable qu'une boucle Python)."""
     try:
         session.set_trading_stop(
-            category="linear",
-            symbol=SYMBOL,
-            trailingStop=str(round(distance, 5)),
-            positionIdx=0
+            category="linear", symbol=SYMBOL,
+            trailingStop=str(round(distance, 5)), positionIdx=0
         )
         logging.info(f"Trailing stop natif activé, distance={distance:.5f}")
         return True
@@ -207,17 +268,17 @@ def set_native_trailing_stop(distance):
         logging.error(f"set_trading_stop error: {e}")
         return False
 
-# ============================================================
-#  INDICATEURS (identiques à la version précédente)
-# ============================================================
-
-def get_klines(interval, limit=200):
+def get_klines(interval, limit=220):
     try:
         res = session.get_kline(category="linear", symbol=SYMBOL, interval=interval, limit=limit)
         return list(reversed(res["result"]["list"]))
     except Exception as e:
         logging.error(f"get_klines error: {e}")
         return []
+
+# ============================================================
+#  INDICATEURS
+# ============================================================
 
 def ema(values, period):
     if len(values) < period:
@@ -229,7 +290,7 @@ def ema(values, period):
         result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
     return result
 
-def rsi(closes, period=14):
+def rsi(closes, period=RSI_PERIOD):
     r = [50.0] * len(closes)
     if len(closes) < period + 1:
         return r
@@ -247,7 +308,7 @@ def rsi(closes, period=14):
         r[i] = 100 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
     return r
 
-def macd(closes, fast=12, slow=26, signal=9):
+def macd(closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
     ema_fast = ema(closes, fast)
     ema_slow = ema(closes, slow)
     macd_line = [None] * len(closes)
@@ -263,7 +324,7 @@ def macd(closes, fast=12, slow=26, signal=9):
             signal_line[offset + i] = v
     return macd_line, signal_line
 
-def stoch_rsi(closes, period=14, smooth=3):
+def stoch_rsi(closes, period=STOCH_PERIOD, smooth=STOCH_SMOOTH):
     r = rsi(closes, period)
     k = [50.0] * len(closes)
     for i in range(period, len(closes)):
@@ -273,7 +334,7 @@ def stoch_rsi(closes, period=14, smooth=3):
     for i in range(len(closes)):
         if i >= smooth - 1:
             k[i] = sum(k[i-smooth+1:i+1]) / smooth
-    return k, k
+    return k
 
 def atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -287,37 +348,30 @@ def atr(highs, lows, closes, period=14):
         atr_list[i] = (atr_list[i-1] * (period-1) + trs[i-1]) / period
     return atr_list
 
-def volume_ma(volumes, period=20):
+def volume_ma(volumes, period=VOLUME_MA_PERIOD):
     vma = [None] * len(volumes)
     for i in range(period-1, len(volumes)):
         vma[i] = sum(volumes[i-period+1:i+1]) / period
     return vma
 
-def detect_bos(highs, lows, idx, lookback=5):
+def detect_bos(highs, lows, idx, lookback):
     if idx < lookback:
         return False, False
     return highs[idx] > max(highs[idx-lookback:idx]), lows[idx] < min(lows[idx-lookback:idx])
 
-def detect_fvg(highs, lows, idx):
-    if idx < 3:
-        return False, False
-    return lows[idx] > highs[idx-3], highs[idx] < lows[idx-3]
-
-def detect_pullback(closes, idx, direction, threshold=0.30):
-    if idx < 10:
+def detect_pullback(closes, idx, direction, threshold=PULLBACK_THRESHOLD, lookback=PULLBACK_LOOKBACK):
+    if idx < lookback:
         return False
     if direction == "bull":
-        recent_high = max(closes[idx-10:idx-3])
+        recent_high = max(closes[idx-lookback:idx-3])
         min_low = min(closes[idx-5:idx])
         if recent_high > 0:
-            retrace = (recent_high - min_low) / recent_high
-            return retrace <= threshold and closes[idx] > min_low
+            return (recent_high - min_low) / recent_high <= threshold and closes[idx] > min_low
     else:
-        recent_low = min(closes[idx-10:idx-3])
+        recent_low = min(closes[idx-lookback:idx-3])
         max_high = max(closes[idx-5:idx])
         if recent_low > 0:
-            retrace = (max_high - recent_low) / recent_low
-            return retrace <= threshold and closes[idx] < max_high
+            return (max_high - recent_low) / recent_low <= threshold and closes[idx] < max_high
     return False
 
 def get_daily_trend():
@@ -335,9 +389,16 @@ def get_daily_trend():
         return "bear"
     return "neutral"
 
-def get_signal():
+# ============================================================
+#  CALCUL DU SCORE (utilisé pour signal réel ET pour affichage)
+# ============================================================
+
+def compute_scores():
+    """Retourne toutes les infos de scoring, indépendamment du seuil.
+    Utilisé à la fois pour décider un trade et pour afficher le score
+    du côté opposé (non déclenché) dans les notifications."""
     kl = get_klines(TIMEFRAME, 220)
-    if len(kl) < 120:
+    if len(kl) < 205:
         return None
 
     closes = [float(x[4]) for x in kl]
@@ -345,17 +406,17 @@ def get_signal():
     lows = [float(x[3]) for x in kl]
     volumes = [float(x[5]) for x in kl]
 
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200)
+    ema_fast_l = ema(closes, EMA_FAST)
+    ema_mid_l = ema(closes, EMA_MID)
+    ema_slow_l = ema(closes, EMA_SLOW)
     rsi_list = rsi(closes)
     macd_line, macd_sig = macd(closes)
-    stoch_k, stoch_d = stoch_rsi(closes)
+    stoch_k = stoch_rsi(closes)
     atr_list = atr(highs, lows, closes)
-    vol_ma = volume_ma(volumes)
+    vma = volume_ma(volumes)
 
     i = -1
-    if any(x is None for x in [ema20[i], ema50[i], ema200[i], atr_list[i]]):
+    if any(x is None for x in [ema_fast_l[i], ema_mid_l[i], ema_slow_l[i], atr_list[i]]):
         return None
 
     price = closes[i]
@@ -366,112 +427,125 @@ def get_signal():
     buy_score = sell_score = 0.0
     buy_details, sell_details = [], []
 
-    if current_rsi <= 30:
-        buy_score += 1.5 + max(0, (30 - current_rsi) / 30)
-        buy_details.append("RSI")
-    elif current_rsi >= 80:
-        sell_score += 1.5 + max(0, (current_rsi - 80) / 20)
-        sell_details.append("RSI")
+    if current_rsi <= RSI_OVERSOLD:
+        pts = RSI_POINTS + max(0, (RSI_OVERSOLD - current_rsi) / RSI_OVERSOLD)
+        buy_score += pts; buy_details.append("RSI")
+    elif current_rsi >= RSI_OVERBOUGHT:
+        pts = RSI_POINTS + max(0, (current_rsi - RSI_OVERBOUGHT) / 20)
+        sell_score += pts; sell_details.append("RSI")
 
-    if price > ema20[i] > ema50[i]:
-        buy_score += 2.1
-        buy_details.append("EMA")
-    elif price < ema20[i] < ema50[i]:
-        sell_score += 2.1
-        sell_details.append("EMA")
+    if price > ema_fast_l[i] > ema_mid_l[i]:
+        buy_score += EMA_POINTS; buy_details.append("EMA")
+    elif price < ema_fast_l[i] < ema_mid_l[i]:
+        sell_score += EMA_POINTS; sell_details.append("EMA")
 
     if macd_line[i] is not None and macd_sig[i] is not None:
         if macd_line[i] > macd_sig[i] and macd_line[i] > 0:
-            buy_score += 1.8
-            buy_details.append("MACD")
+            buy_score += MACD_POINTS; buy_details.append("MACD")
         elif macd_line[i] < macd_sig[i] and macd_line[i] < 0:
-            sell_score += 1.8
-            sell_details.append("MACD")
+            sell_score += MACD_POINTS; sell_details.append("MACD")
 
-    if stoch_k[i] <= 10 and stoch_d[i] <= 10:
-        buy_score += 1.4
-        buy_details.append("Stoch")
-    elif stoch_k[i] >= 90 and stoch_d[i] >= 90:
-        sell_score += 1.4
-        sell_details.append("Stoch")
+    if stoch_k[i] <= STOCH_OVERSOLD:
+        buy_score += STOCH_POINTS; buy_details.append("Stoch")
+    elif stoch_k[i] >= STOCH_OVERBOUGHT:
+        sell_score += STOCH_POINTS; sell_details.append("Stoch")
 
-    if vol_ma[i] and current_vol > vol_ma[i] * 1.5:
+    if vma[i] and current_vol > vma[i] * VOLUME_SPIKE_MULT:
         if buy_score > 0:
-            buy_score += 0.8
-            buy_details.append("Vol")
+            buy_score += VOLUME_POINTS; buy_details.append("Vol")
         if sell_score > 0:
-            sell_score += 0.8
-            sell_details.append("Vol")
+            sell_score += VOLUME_POINTS; sell_details.append("Vol")
 
-    bos_h, bos_b = detect_bos(highs, lows, len(closes)-1)
-    if bos_h:
-        buy_score += 0.9
-        buy_details.append("BOS")
-    if bos_b:
-        sell_score += 0.9
-        sell_details.append("BOS")
+    st_bos_h, st_bos_b = detect_bos(highs, lows, len(closes)-1, ST_BOS_LOOKBACK)
+    lt_bos_h, lt_bos_b = detect_bos(highs, lows, len(closes)-1, LT_BOS_LOOKBACK)
 
-    fvg_h, fvg_b = detect_fvg(highs, lows, len(closes)-1)
-    if fvg_h:
-        buy_score += 0.7
-        buy_details.append("FVG")
-    if fvg_b:
-        sell_score += 0.7
-        sell_details.append("FVG")
+    if st_bos_h:
+        buy_score += ST_BOS_POINTS; buy_details.append("ST-BOS")
+    if lt_bos_h:
+        buy_score += LT_BOS_POINTS; buy_details.append("LT-BOS")
+    if st_bos_b:
+        sell_score += ST_BOS_POINTS; sell_details.append("ST-BOS")
+    if lt_bos_b:
+        sell_score += LT_BOS_POINTS; sell_details.append("LT-BOS")
 
     if detect_pullback(closes, len(closes)-1, "bull"):
-        buy_score += 0.8
-        buy_details.append("Pullback")
+        buy_score += PULLBACK_POINTS; buy_details.append("Pullback")
     if detect_pullback(closes, len(closes)-1, "bear"):
-        sell_score += 0.8
-        sell_details.append("Pullback")
+        sell_score += PULLBACK_POINTS; sell_details.append("Pullback")
 
     daily = get_daily_trend()
-    required = SCORE_MIN
-    if daily == "bull" and sell_score > 0:
-        required = SCORE_MIN_CONTRE
-    elif daily == "bear" and buy_score > 0:
-        required = SCORE_MIN_CONTRE
-
-    side = None
-    score = 0
-    details = []
-    if buy_score >= required:
-        side, score, details = "Buy", buy_score, buy_details
-    elif sell_score >= required:
-        side, score, details = "Sell", sell_score, sell_details
-
-    if side is None:
-        return None
-
-    stop_dist = current_atr * SL_ATR_MULT
-    if side == "Buy":
-        sl = price - stop_dist
-        tp = price + stop_dist * RR_RATIO
-    else:
-        sl = price + stop_dist
-        tp = price - stop_dist * RR_RATIO
-
-    trailing_distance = current_atr * TRAILING_ATR_MULT
 
     return {
+        "price": price, "atr": current_atr, "daily": daily,
+        "buy_score": buy_score, "buy_details": buy_details,
+        "sell_score": sell_score, "sell_details": sell_details,
+        "buy_lt_bos": lt_bos_h, "buy_st_bos": st_bos_h,
+        "sell_lt_bos": lt_bos_b, "sell_st_bos": st_bos_b,
+    }
+
+def format_side_summary(score, details, label):
+    if score <= 0:
+        return f"{label} : +0"
+    tag = ", ".join(details) if details else "?"
+    return f"{label} : +{score:.1f} ({tag})"
+
+def get_signal():
+    data = compute_scores()
+    if data is None:
+        return None, None
+
+    required_buy = SCORE_MIN_CONTRE if data["daily"] == "bear" else SCORE_MIN
+    required_sell = SCORE_MIN_CONTRE if data["daily"] == "bull" else SCORE_MIN
+
+    side, score, details, lt_bos, st_bos = None, 0, [], False, False
+    if data["buy_score"] >= required_buy:
+        side, score, details = "Buy", data["buy_score"], data["buy_details"]
+        lt_bos, st_bos = data["buy_lt_bos"], data["buy_st_bos"]
+    elif data["sell_score"] >= required_sell:
+        side, score, details = "Sell", data["sell_score"], data["sell_details"]
+        lt_bos, st_bos = data["sell_lt_bos"], data["sell_st_bos"]
+
+    if side is None:
+        return None, data
+
+    # Choix du RR selon le type de BOS présent (LT prioritaire s'il est là)
+    if lt_bos:
+        rr_used = RR_RATIO_LT
+    elif st_bos:
+        rr_used = RR_RATIO_ST
+    else:
+        rr_used = RR_RATIO_DEFAULT
+
+    stop_dist = data["atr"] * SL_ATR_MULT
+    price = data["price"]
+    if side == "Buy":
+        sl = price - stop_dist
+        tp = price + stop_dist * rr_used
+    else:
+        sl = price + stop_dist
+        tp = price - stop_dist * rr_used
+
+    trailing_distance = data["atr"] * TRAILING_ATR_MULT
+
+    signal = {
         "side": side, "entry": price, "sl": sl, "tp": tp,
-        "score": score, "details": details, "daily": daily,
+        "score": score, "details": details, "daily": data["daily"],
+        "rr_used": rr_used, "lt_bos": lt_bos, "st_bos": st_bos,
         "trailing_distance": trailing_distance,
     }
+    return signal, data
 
 # ============================================================
 #  TRADING
 # ============================================================
 
-def place_order(signal):
+def place_order(signal, opposite_summary):
     global last_trade_time, tracked_position
 
     capital = get_balance()
     risk_amount = capital * RISK_PER_TRADE
     stop_dist = abs(signal["entry"] - signal["sl"])
-    qty = risk_amount / stop_dist
-    qty = math.floor(qty) if qty >= 1 else 0
+    qty = math.floor(risk_amount / stop_dist) if stop_dist > 0 else 0
 
     if qty <= 0:
         logging.warning("Qty calculée = 0, trade ignoré")
@@ -489,10 +563,8 @@ def place_order(signal):
             orderType="Market", qty=str(qty),
             stopLoss=str(round(signal["sl"], 5)),
             takeProfit=str(round(signal["tp"], 5)),
-            slTriggerBy="LastPrice",
-            tpTriggerBy="LastPrice",
-            tpslMode="Full",
-            timeInForce="GTC",
+            slTriggerBy="LastPrice", tpTriggerBy="LastPrice",
+            tpslMode="Full", timeInForce="GTC",
         )
     except Exception as e:
         logging.error(f"Order error: {e}")
@@ -505,18 +577,21 @@ def place_order(signal):
         "trailing_active": False, "trailing_distance": signal["trailing_distance"],
     }
 
+    bos_tag = "LT-BOS" if signal["lt_bos"] else ("ST-BOS" if signal["st_bos"] else "aucun BOS")
+
     msg = (
         f"{'🟢' if signal['side']=='Buy' else '🔴'} <b>NEXUS — OUVERTURE {signal['side'].upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 <b>{SYMBOL}</b> | TF {TIMEFRAME}m\n"
         f"💰 Entrée : <code>{signal['entry']:.5f}</code>\n"
         f"🛑 SL : <code>{signal['sl']:.5f}</code>\n"
-        f"🎯 TP : <code>{signal['tp']:.5f}</code>\n"
+        f"🎯 TP : <code>{signal['tp']:.5f}</code> (RR {signal['rr_used']:.1f} — {bos_tag})\n"
         f"📦 Quantité : {qty} ({risk_amount:.2f} USDT risqués)\n"
         f"📊 Score : <b>{signal['score']:.1f}</b>\n"
         f"📈 Confluences : {', '.join(signal['details'])}\n"
         f"🌐 Biais journalier : {signal['daily'].upper()}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔁 <i>Signal opposé au même instant :</i>\n{opposite_summary}"
     )
     tg(msg)
     log_trade("OPEN", signal["side"], signal["entry"], signal["score"], 0, "NEW")
@@ -524,13 +599,11 @@ def place_order(signal):
     return True
 
 def manage_trailing(real_pos):
-    """Active/ajuste le trailing stop natif une fois le seuil de profit atteint."""
     global tracked_position
     if tracked_position is None or real_pos is None:
         return
 
     entry = tracked_position["entry"]
-    current_price = real_pos["entry"]  # avgPrice reste l'entrée; on utilise mark via unrealised_pnl à défaut
     unrealised = real_pos["unrealised_pnl"]
     size_value = real_pos["size"] * entry
     profit_pct_estimate = (unrealised / size_value) if size_value > 0 else 0
@@ -543,7 +616,6 @@ def manage_trailing(real_pos):
                f"(profit actuel ≈ {profit_pct_estimate*100:.2f}%)")
 
 def send_close_notification():
-    """Va chercher le vrai PnL réalisé sur Bybit et notifie avec les vraies données."""
     closed = get_last_closed_pnl()
     if closed:
         emoji = "✅" if closed["pnl"] > 0 else "❌"
@@ -568,82 +640,3 @@ def send_close_notification():
 # ============================================================
 
 def main():
-    global daily_start_capital, last_reset_date, last_trade_time, last_heartbeat, tracked_position
-
-    tg(f"🚀 <b>NEXUS v2 démarré</b>\nMode : DÉMO BYBIT\nSymbole : {SYMBOL}\nTF : {TIMEFRAME}m")
-
-    real_pos = get_real_position()
-    if real_pos:
-        tg(f"🔄 <b>Position reprise au démarrage</b>\n{real_pos['side']} {real_pos['size']} @ "
-           f"{real_pos['entry']:.5f}\nPnL non réalisé : {real_pos['unrealised_pnl']:+.2f} USDT")
-        tracked_position = {"side": real_pos["side"], "entry": real_pos["entry"],
-                             "trailing_active": False, "trailing_distance": None}
-        logging.info(f"Position reprise: {real_pos}")
-    else:
-        logging.info("Aucune position ouverte au démarrage")
-
-    capital = get_balance()
-    daily_start_capital = capital
-    last_reset_date = date.today()
-    last_heartbeat = time.time()
-    logging.info(f"Capital: {capital:.2f} USDT")
-
-    previous_had_position = real_pos is not None
-
-    while True:
-        try:
-            check_telegram_commands()
-
-            # Reset quotidien du capital de référence
-            if date.today() != last_reset_date:
-                daily_start_capital = get_balance()
-                last_reset_date = date.today()
-                logging.info(f"Reset capital journalier: {daily_start_capital:.2f} USDT")
-                tg(f"🔁 Nouveau jour — capital de référence reset à {daily_start_capital:.2f} USDT")
-
-            capital = get_balance()
-            daily_pnl = capital - daily_start_capital
-
-            if daily_pnl <= -(daily_start_capital * MAX_DAILY_LOSS_PCT):
-                tg(f"🛑 <b>MAX DAILY LOSS atteint</b>\nP&L jour : {daily_pnl:.2f} USDT\nBot en pause 30 min.")
-                time.sleep(1800)
-                continue
-
-            # Heartbeat périodique pour ne jamais rester dans le silence
-            if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
-                real_pos = get_real_position()
-                if real_pos:
-                    status = (f"📍 Position en cours: {real_pos['side']} @ {real_pos['entry']:.5f} "
-                              f"(PnL: {real_pos['unrealised_pnl']:+.2f} USDT)")
-                else:
-                    status = "📭 Aucune position ouverte, en attente d'un signal."
-                tg(f"💓 <b>NEXUS actif</b>\nCapital: {capital:.2f} USDT\n{status}")
-                last_heartbeat = time.time()
-
-            # Synchronisation position
-            real_pos = get_real_position()
-            has_position = real_pos is not None
-
-            if previous_had_position and not has_position:
-                send_close_notification()
-                tracked_position = None
-
-            if has_position:
-                manage_trailing(real_pos)
-
-            previous_had_position = has_position
-
-            if not has_position and time.time() - last_trade_time > COOLDOWN_AFTER_TRADE_SEC:
-                signal = get_signal()
-                if signal:
-                    place_order(signal)
-
-            time.sleep(LOOP_SLEEP_SEC)
-
-        except Exception as e:
-            logging.error(f"Loop error: {e}")
-            tg(f"⚠️ Erreur boucle principale:\n<code>{e}</code>")
-            time.sleep(20)
-
-if __name__ == "__main__":
-    main()
